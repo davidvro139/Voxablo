@@ -1,0 +1,6 @@
+[gd_scene format=3 uid="uid://lmq4dxd3kap7"]
+
+[ext_resource type="Script" path="res://scripts/terrain_renderer.gd" id="1_terrain"]
+
+[node name="Terrain" type="Node3D"]
+script = ExtResource("1_terrain")

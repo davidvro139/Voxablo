@@ -1,0 +1,43 @@
+[gd_scene load_steps=4 format=3 uid="uid://bl6h2z9kaqpk0"]
+
+[ext_resource type="Script" path="res://scripts/main.gd" id="1_abc12"]
+[ext_resource type="Script" path="res://scripts/diagnostic_overlay.gd" id="2_def34"]
+[ext_resource type="PackedScene" path="res://scenes/terrain.tscn" id="3_terrain"]
+
+[node name="Main" type="Node3D"]
+script = ExtResource("1_abc12")
+
+[node name="Camera3D" type="Camera3D" parent="."]
+transform = Transform3D(0.866025, -0.25, 0.433013, 0, 0.866025, 0.5, -0.5, -0.433013, 0.75, 20, 15, 20)
+current = true
+projection = 1
+size = 20.0
+near = 0.1
+far = 1000.0
+
+[node name="Light3D" type="DirectionalLight3D" parent="."]
+transform = Transform3D(0.707107, -0.408248, 0.57735, 0.707107, 0.408248, -0.57735, 0, 0.816496, 0.57735, 10, 20, 10)
+light_energy_multiplier = 1.2
+
+[node name="WorldEnvironment" type="WorldEnvironment" parent="."]
+
+[node name="Terrain" parent="." instance=ExtResource("3_terrain")]
+
+[node name="DiagnosticOverlay" type="CanvasLayer" parent="."]
+layer = 128
+
+[node name="DiagnosticLabel" type="Label" parent="DiagnosticOverlay"]
+anchor_left = 0.0
+anchor_top = 0.0
+anchor_right = 0.3
+anchor_bottom = 0.4
+offset_left = 10.0
+offset_top = 10.0
+offset_right = -10.0
+offset_bottom = -10.0
+theme_override_font_sizes/font_size = 14
+text = "FPS: 0
+Chunks Loaded: 0
+Chunks Dirty: 0
+Frame Time: 0 ms"
+script = ExtResource("2_def34")

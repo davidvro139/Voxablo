@@ -1,0 +1,12 @@
+[package]
+name = "voxel-viewer"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+bevy = { version = "0.13" }
+voxel-core-ffi = { path = "../voxel-core-ffi" }
+
+[[bin]]
+name = "voxel-viewer"
+path = "src/main.rs"

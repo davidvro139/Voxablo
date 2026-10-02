@@ -1,0 +1,33 @@
+# Rust
+/target/
+
+# MSBuild / CMake output
+project/native/bin/
+project/native/obj/
+project/native/build/
+project/native/x64/
+*.pdb
+*.ilk
+*.obj
+*.tlog
+*.recipe
+*.lastbuildstate
+
+# Visual Studio
+.vs/
+*.user
+*.suo
+
+# Godot
+.godot/
+Godot_v*.exe
+Godot_v*/
+
+# Vendored third-party SDKs (fetch separately, see README)
+godot-cpp*/
+
+# Editors / OS
+.vscode/
+.idea/
+Thumbs.db
+.DS_Store

@@ -1,0 +1,39 @@
+
+Microsoft Visual Studio Solution File, Format Version 12.00
+# Visual Studio Version 17
+VisualStudioVersion = 17.0.31919.166
+MinimumVisualStudioVersion = 10.0.40219.1
+Project("{8BC9CEB8-8B4A-11D0-8D11-00A0C91BC942}") = "voxel_core_lib", "voxel_core_lib.vcxproj", "{A1B2C3D4-E5F6-47G8-H9I0-J1K2L3M4N5O6}"
+EndProject
+Project("{8BC9CEB8-8B4A-11D0-8D11-00A0C91BC942}") = "voxel_core_tests", "voxel_core_tests.vcxproj", "{B2C3D4E5-F6G7-48H9-I0J1-K2L3M4N5O6P7}"
+	ProjectSection(ProjectDependencies) = postProject
+		{A1B2C3D4-E5F6-47G8-H9I0-J1K2L3M4N5O6} = {A1B2C3D4-E5F6-47G8-H9I0-J1K2L3M4N5O6}
+	EndProjectSection
+EndProject
+Project("{8BC9CEB8-8B4A-11D0-8D11-00A0C91BC942}") = "voxel_wrapper", "voxel_wrapper.vcxproj", "{D4E5F6G7-H8I9-50J1-K2L3-M4N5O6P7Q8R9}"
+EndProject
+Project("{8BC9CEB8-8B4A-11D0-8D11-00A0C91BC942}") = "voxel_viewer", "voxel_viewer.vcxproj", "{E5F6G7H8-I9J0-51K2-L3M4-N5O6P7Q8R9S0}"
+EndProject
+Global
+	GlobalSection(SolutionConfigurationPlatforms) = preSolution
+		Debug|x64 = Debug|x64
+		Release|x64 = Release|x64
+	EndGlobalSection
+	GlobalSection(ProjectConfigurationPlatforms) = postSolution
+		{A1B2C3D4-E5F6-47G8-H9I0-J1K2L3M4N5O6}.Debug|x64.ActiveCfg = Debug|x64
+		{A1B2C3D4-E5F6-47G8-H9I0-J1K2L3M4N5O6}.Debug|x64.Build.0 = Debug|x64
+		{A1B2C3D4-E5F6-47G8-H9I0-J1K2L3M4N5O6}.Release|x64.ActiveCfg = Release|x64
+		{A1B2C3D4-E5F6-47G8-H9I0-J1K2L3M4N5O6}.Release|x64.Build.0 = Release|x64
+		{B2C3D4E5-F6G7-48H9-I0J1-K2L3M4N5O6P7}.Debug|x64.ActiveCfg = Debug|x64
+		{B2C3D4E5-F6G7-48H9-I0J1-K2L3M4N5O6P7}.Debug|x64.Build.0 = Debug|x64
+		{B2C3D4E5-F6G7-48H9-I0J1-K2L3M4N5O6P7}.Release|x64.ActiveCfg = Release|x64
+		{B2C3D4E5-F6G7-48H9-I0J1-K2L3M4N5O6P7}.Release|x64.Build.0 = Release|x64
+		{D4E5F6G7-H8I9-50J1-K2L3-M4N5O6P7Q8R9}.Debug|x64.ActiveCfg = Debug|x64
+		{D4E5F6G7-H8I9-50J1-K2L3-M4N5O6P7Q8R9}.Debug|x64.Build.0 = Debug|x64
+		{D4E5F6G7-H8I9-50J1-K2L3-M4N5O6P7Q8R9}.Release|x64.ActiveCfg = Release|x64
+		{D4E5F6G7-H8I9-50J1-K2L3-M4N5O6P7Q8R9}.Release|x64.Build.0 = Release|x64
+	EndGlobalSection
+	GlobalSection(SolutionProperties) = preSolution
+		HideSolutionNode = FALSE
+	EndGlobalSection
+EndGlobal
