@@ -28,10 +28,12 @@ pub enum Cue {
     Meteor = 12,
     Frost = 13,
     Beam = 14,
+    Bark = 15,
+    Shriek = 16,
 }
 
 impl Cue {
-    const COUNT: usize = 15;
+    const COUNT: usize = 17;
 
     fn gain(self) -> f32 {
         match self {
@@ -50,6 +52,8 @@ impl Cue {
             Cue::Meteor => 0.88,
             Cue::Frost => 0.66,
             Cue::Beam => 0.28,
+            Cue::Bark => 0.6,
+            Cue::Shriek => 0.55,
         }
     }
 
@@ -70,6 +74,8 @@ impl Cue {
             Cue::Meteor,
             Cue::Frost,
             Cue::Beam,
+            Cue::Bark,
+            Cue::Shriek,
         ]
     }
 }
@@ -197,6 +203,8 @@ fn render(cue: Cue) -> Vec<f32> {
         Cue::Meteor => boom(0.48, 42.0, 1.35),
         Cue::Frost => frost(),
         Cue::Beam => beam(),
+        Cue::Bark => bark(),
+        Cue::Shriek => shriek(),
     }
 }
 
@@ -315,6 +323,45 @@ fn hurt(start: f32) -> Vec<f32> {
         let voice = (phase * std::f32::consts::TAU).sin() + 0.28 * (phase * std::f32::consts::TAU * 2.0).sin();
         let env = (t * 50.0).min(1.0) * (-t * 9.0).exp();
         let breath = noise.next() * (-t * 28.0).exp() * 0.22;
+        buffer.push((voice * env + breath).tanh());
+    }
+    finish(buffer)
+}
+
+/// A low, rough growl: an enemy has spotted the player.
+fn bark() -> Vec<f32> {
+    let n = samples(0.32);
+    let mut noise = Noise::new(71);
+    let mut phase = 0.0;
+    let mut buffer = Vec::with_capacity(n);
+    for i in 0..n {
+        let t = i as f32 / RATE as f32;
+        // A quick rise into the snarl, then a sag.
+        let freq = 92.0 + 46.0 * (t * 18.0).min(1.0) - 30.0 * (t / 0.32);
+        let rasp = 1.0 + 0.35 * (t * std::f32::consts::TAU * 31.0).sin();
+        phase = (phase + freq * rasp / RATE as f32).fract();
+        let voice = (phase * std::f32::consts::TAU).sin() + 0.5 * (phase * std::f32::consts::TAU * 3.0).sin();
+        let env = (t * 40.0).min(1.0) * (-t * 7.0).exp();
+        let grit = noise.next() * 0.3 * env;
+        buffer.push(((voice * env + grit) * 1.8).tanh());
+    }
+    finish(buffer)
+}
+
+/// A high, wavering squeal: an enemy has lost its nerve and is running.
+fn shriek() -> Vec<f32> {
+    let n = samples(0.42);
+    let mut noise = Noise::new(113);
+    let mut phase = 0.0;
+    let mut buffer = Vec::with_capacity(n);
+    for i in 0..n {
+        let t = i as f32 / RATE as f32;
+        let wobble = 1.0 + 0.06 * (t * std::f32::consts::TAU * 13.0).sin();
+        let freq = (640.0 + 520.0 * (t * 9.0).min(1.0) - 260.0 * (t / 0.42)) * wobble;
+        phase = (phase + freq / RATE as f32).fract();
+        let voice = (phase * std::f32::consts::TAU).sin() + 0.2 * (phase * std::f32::consts::TAU * 2.0).sin();
+        let env = (t * 60.0).min(1.0) * (-t * 4.5).exp();
+        let breath = noise.next() * 0.12 * env;
         buffer.push((voice * env + breath).tanh());
     }
     finish(buffer)

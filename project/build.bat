@@ -3,7 +3,7 @@ setlocal enabledelayedexpansion
 
 echo.
 echo ===================================================
-echo Persistent Voxel ARPG — Build & Test (Visual Studio)
+echo Voxablo — Build & Test (Visual Studio)
 echo ===================================================
 echo.
 

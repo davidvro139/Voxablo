@@ -72,7 +72,30 @@ Units are metres; voxels are 10 cm (Teardown scale).
   linear/angular impulses and friction in shared substeps. Large-piece sampling and very fast
   impacts remain approximate. Later spell blasts and direct spell hits now shove and spin
   live falling pieces too. Active-body budgets and a spatial broad phase are still needed.
-- Shift sprint, Space jump, R regenerate terrain and respawn
+- Shift sprint, Space jump, Left Ctrl dodge toward the cursor (0.25 s invulnerable, 0.75 s cooldown),
+  R regenerate terrain and respawn
+- Group combat (`src/feel.rs`, tokens in `main.rs`): at most two melee bodies and one archer attack
+  at once; the rest circle a wider ring. Each body has poise; breaking it or taking a part
+  cancels the windup and staggers. Windups draw a filling ground arc (melee) or lane (arrow).
+  Severs, staggers, kills and hits on the player trigger a short hit-stop.
+- Senses (`src/senses.rs`): enemies start unaware. They see 22 m ahead with a voxel line-of-sight
+  test, sense the player within 3 m regardless, and hear blasts, collapses, death cries and sword
+  hits. A body that spots you growls and calls its pack within 12 m. Alert bodies hunt your last
+  known position for 8 s. Fallen within 5 m of a death shriek and scatter for 3.5 s unless cornered;
+  some armless bodies limp away. The HUD shows unaware / searching / panicking.
+- Navigation (`src/nav.rs`, `update_nav` in `main.rs`): a Dijkstra map toward the player over
+  standable floors (0.5 m cells, up to four storeys per column, one-way drops). Enemies follow it
+  when the straight line is blocked or they get stuck; fleeing bodies use Brogue's flee map.
+  Blasts rebuild the cells under them, so a hole in a wall is a new route on the next refill.
+- Roles and environment: archers back off before drawing when you close in and shoot point-blank
+  only when cornered; waiting shielded skeletons stand between you and an archer. Alert bodies run
+  from a fire orb about to burst. Fast rubble damages the part it hits. Two "Volatile" elites glow
+  orange and, once downed, show a filling ring and burst 0.9 s later (crater, body damage, chains).
+- Decisions and pacing (`src/utility.rs`, `src/director.rs`): engaged bodies choose to press, hold,
+  flank (circling behind you when you're watching them, with a growl), or fall back to an ally
+  when wrecked and alone. A pacing director wakes the nearest unaware group after a quiet spell and
+  allows only one melee attacker at a time while you are below 35 health.
+  `RUST_LOG=voxel_viewer=debug` logs director phase changes and nav rebuild timings.
 
 ## Known issues in voxel_core
 

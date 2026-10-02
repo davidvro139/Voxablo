@@ -1,4 +1,4 @@
-# Environment Setup for Persistent Voxel ARPG
+# Environment Setup for Voxablo
 
 ## Status: M0 Repository Structure Complete
 

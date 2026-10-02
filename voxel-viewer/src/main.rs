@@ -1,5 +1,8 @@
 mod combat;
+mod director;
 mod falling;
+mod nav;
+mod feel;
 mod outdoor;
 mod sfx;
 mod tristram;
@@ -9,7 +12,9 @@ mod player_model;
 mod raycast;
 mod rig;
 mod rigid;
+mod senses;
 mod spells;
+mod utility;
 
 use bevy::audio::AddAudioSource;
 use bevy::app::AppExit;
@@ -25,7 +30,8 @@ use occluder_fade::{FadingMaterial, OccluderFade, OccluderFadeParams, OccluderFa
 use bevy::core_pipeline::bloom::{BloomCompositeMode, BloomPrefilterSettings, BloomSettings};
 use player::{walk_step, Body, ENEMY_BODY, HUMAN, VOXEL_SIZE};
 use combat::{
-    choose_cursor_body, plan_fight, CursorSample, Part, Species, Stance, CURSOR_DEPTH_SLACK, CURSOR_PICK_RADIUS, MELEE_CUT,
+    choose_cursor_body, plan_fight_engaged, CursorSample, Engage, Part, Species, Stance, CURSOR_DEPTH_SLACK, CURSOR_PICK_RADIUS,
+    MELEE_CUT,
 };
 use spells::{CameraShake, SpellsPlugin};
 use raycast::{raycast, Hit};
@@ -50,7 +56,59 @@ const ARRIVE_RADIUS: f32 = 0.1;
 const STUCK_TIMEOUT: f32 = 0.5;
 /// How far the drawn character may lag behind its collider when stepping up or down.
 const MAX_VISUAL_LAG: f32 = 0.35;
-const ENEMY_AGGRO_RANGE: f32 = 28.0;
+/// Alert bodies run from a fire orb this close to bursting, when they stand this far inside its reach.
+const ORB_DODGE_FUSE: f32 = 1.0;
+const ORB_DODGE_MARGIN: f32 = 0.6;
+/// A shielded skeleton waiting its turn stands this far from the player, on the line to an archer.
+const SCREEN_DISTANCE: f32 = 2.2;
+/// Archers further than this from a skeleton are not its to cover.
+const SCREEN_RANGE: f32 = 14.0;
+/// Falling rubble slower than this only bumps; faster, it hurts the part it hits.
+const RUBBLE_MIN_SPEED: f32 = 3.0;
+const RUBBLE_COOLDOWN: f32 = 0.35;
+/// Rubble on the player: damage per m/s over the threshold (enemies take 7), and a cap.
+const RUBBLE_PLAYER_SCALE: f32 = 4.0;
+const RUBBLE_PLAYER_MAX: f32 = 45.0;
+/// Volatile elites: a wreck that glows, telegraphs a ring, and bursts.
+const VOLATILE_FUSE: f32 = 0.9;
+/// In voxels, like spell blasts: 1.6 m.
+const VOLATILE_RADIUS: f32 = 16.0;
+const VOLATILE_ENERGY: f32 = 5.0;
+const VOLATILE_ENEMY_DAMAGE: f32 = 90.0;
+const VOLATILE_PLAYER_DAMAGE: f32 = 28.0;
+/// An archer re-picks its firing spot this often while it can't see the player.
+const PERCH_RETHINK: f32 = 1.5;
+/// Rings around the player an archer looks for a clear shot on, and how many spots per ring.
+const PERCH_RINGS: [f32; 2] = [6.5, 9.0];
+const PERCH_SPOTS: usize = 16;
+/// Spots this far above or below the player are not worth climbing to.
+const PERCH_MAX_RISE: f32 = 4.0;
+/// Frenzied elites: a death this close sets them off for this long, attacking at this fraction of
+/// their usual windup and recovery.
+const FRENZY_RADIUS: f32 = 10.0;
+const FRENZY_SECONDS: f32 = 8.0;
+const FRENZY_HASTE: f32 = 0.6;
+/// Wallbreakers: stuck this long, they smash a hole this big (voxels) in front of them.
+const SMASH_AFTER_STUCK: f32 = 0.3;
+const SMASH_RADIUS: f32 = 7.0;
+const SMASH_ENERGY: f32 = 5.0;
+const SMASH_COOLDOWN: f32 = 0.8;
+/// Allies this close count as "near" for the decision layer.
+const ALLY_NEAR: f32 = 6.0;
+/// A flanker circles to this distance, this far round from the player's front.
+const FLANK_DISTANCE: f32 = 2.6;
+/// A body falling back stops once it is this close to an ally.
+const REGROUP_DISTANCE: f32 = 2.0;
+/// The director only wakes groups this close to the player.
+const NUDGE_RANGE: f32 = 40.0;
+/// The Dijkstra maps are built around the player; goals within this of the player may use them.
+const NAV_TRUST_RADIUS: f32 = 4.0;
+/// Trying to walk and barely moving for this long counts as stuck.
+const STUCK_LIMIT: f32 = 0.5;
+const UNSTICK_SECONDS: f32 = 1.0;
+/// Eye and chest heights for line of sight between an enemy and the player.
+const ENEMY_EYE_Y: f32 = 1.2;
+const PLAYER_CHEST_Y: f32 = 1.1;
 const PLAYER_SEPARATION_RADIUS: f32 = 0.65;
 const ENEMY_SEPARATION_RADIUS: f32 = 0.75;
 pub const ENEMY_BODY_CENTER_Y: f32 = 0.75;
@@ -67,6 +125,17 @@ const STRIKE_LUNGE: f32 = 3.8;
 /// Matches the step-in so repeated cuts rock in place instead of walking through.
 const RECOVER_SLIDE: f32 = 4.0;
 const HIT_INVULN: f32 = 0.45;
+/// Dodge: a short burst toward the cursor that slips a committed swing.
+const DASH_SPEED: f32 = 12.0;
+const DASH_SECONDS: f32 = 0.18;
+const DASH_INVULN: f32 = 0.25;
+const DASH_COOLDOWN: f32 = 0.75;
+/// Attack tokens: how many melee and ranged bodies may be swinging or drawing at once.
+const TOKEN_POOL: [usize; 2] = [2, 1];
+/// A token not used for an attack within this long goes back, so a blocked body can't hog it.
+const TOKEN_TIMEOUT: f32 = 3.0;
+/// After an attack, others waiting go first for this long.
+const TOKEN_REST: f32 = 0.6;
 /// A zombie's connecting hit keeps dealing this much health per second.
 const ZOMBIE_POISON_DPS: f32 = 5.0;
 const ZOMBIE_POISON_SECONDS: f32 = 3.0;
@@ -136,6 +205,12 @@ struct Player {
     recoil: f32,
     /// Horizontal shove from the last hit, in metres per second.
     shove: Vec3,
+    /// Seconds left in a dodge, its direction, and the wait before the next one.
+    dash_left: f32,
+    dash_dir: Vec3,
+    dash_cooldown: f32,
+    /// Set by input: the flat offset toward the cursor, or zero to dodge where the player faces.
+    dash_request: Option<Vec3>,
 }
 
 #[derive(Component, Default)]
@@ -180,11 +255,80 @@ struct BattleHud;
 #[derive(Component)]
 pub struct Enemy {
     fighter: combat::Fighter,
+    /// Holds one of the shared attack tokens.
+    token: bool,
+    token_held: f32,
+    token_rest: f32,
+    /// Last frame's parts, stagger, and down state, so a change can kick hit-stop once.
+    seen_parts: u32,
+    seen_stagger: bool,
+    seen_down: bool,
+    senses: senses::Awareness,
+    /// Seconds spent trying to move without moving, and seconds left following the map because of it.
+    stuck: f32,
+    unstick: f32,
+    rubble_cooldown: f32,
+    /// Elite traits. A volatile body's fuse runs after it goes down.
+    traits: Traits,
+    volatile_fuse: Option<f32>,
+    /// Seconds of frenzy left, and until a wallbreaker can smash again.
+    frenzy: f32,
+    smash_cooldown: f32,
+    /// What the body wants while engaged, and seconds until it reconsiders.
+    intent: utility::Intent,
+    rethink: f32,
+    /// Parts at spawn, for how wrecked the body is.
+    full_parts: u32,
+    /// An archer's chosen firing spot while it can't see the player, and seconds until it re-picks.
+    perch: Option<Vec3>,
+    perch_timer: f32,
 }
+
+/// What an enemy's glow was last set to, so the material only changes when the trait does.
+#[derive(Component, Default)]
+struct EliteLook(Option<(Traits, bool)>);
 
 impl Enemy {
     fn of(species: Species) -> Self {
-        Self { fighter: combat::Fighter::new(species) }
+        let fighter = combat::Fighter::new(species);
+        let seen_parts = fighter.parts_left();
+        Self {
+            fighter,
+            token: false,
+            token_held: 0.0,
+            token_rest: 0.0,
+            seen_parts,
+            seen_stagger: false,
+            seen_down: false,
+            senses: senses::Awareness::default(),
+            stuck: 0.0,
+            unstick: 0.0,
+            rubble_cooldown: 0.0,
+            traits: Traits::default(),
+            volatile_fuse: None,
+            frenzy: 0.0,
+            smash_cooldown: 0.0,
+            intent: utility::Intent::default(),
+            rethink: 0.0,
+            full_parts: seen_parts,
+            perch: None,
+            perch_timer: 0.0,
+        }
+    }
+
+    fn with_traits(mut self, traits: Traits) -> Self {
+        self.traits = traits;
+        self
+    }
+
+    pub fn telegraph(&self) -> Option<combat::Telegraph> {
+        self.fighter.telegraph()
+    }
+
+    /// Burst radius in metres and how far the fuse has burned, 0 to 1.
+    pub fn burst_telegraph(&self) -> Option<(f32, f32)> {
+        let left = self.volatile_fuse?;
+        Some((VOLATILE_RADIUS * VOXEL_SIZE, 1.0 - (left / VOLATILE_FUSE).clamp(0.0, 1.0)))
     }
 
     pub fn is_down(&self) -> bool {
@@ -216,7 +360,24 @@ impl Enemy {
     }
 
     pub fn status_line(&self) -> String {
-        self.fighter.status_line()
+        let mood = if self.is_down() {
+            None
+        } else if self.senses.fleeing() {
+            Some("panicking")
+        } else if !self.senses.is_alert() {
+            Some("unaware")
+        } else if self.frenzy > 0.0 {
+            Some("in a frenzy")
+        } else if !self.senses.sees {
+            Some("searching")
+        } else if matches!(self.intent, utility::Intent::Flank | utility::Intent::Regroup) {
+            Some(self.intent.label())
+        } else {
+            None
+        };
+        let elite = Traits { volatile: self.traits.volatile || self.volatile_fuse.is_some(), ..self.traits }.names();
+        let mood = mood.map_or(String::new(), |mood| format!(" ({mood})"));
+        format!("{}{}{}", elite, self.fighter.status_line(), mood)
     }
 
     pub fn damage_along(&mut self, amount: f32, from: Vec3, to: Vec3, transform: &Transform) -> combat::StrikeReport {
@@ -302,6 +463,10 @@ impl Player {
             swing_height: 0.85,
             recoil: 0.0,
             shove: Vec3::ZERO,
+            dash_left: 0.0,
+            dash_dir: Vec3::ZERO,
+            dash_cooldown: 0.0,
+            dash_request: None,
         }
     }
 }
@@ -344,7 +509,7 @@ fn main() {
         .insert_resource(CameraRig { view_height: DEFAULT_VIEW_HEIGHT })
         .add_plugins(DefaultPlugins.set(WindowPlugin {
             primary_window: Some(Window {
-                title: "Persistent Voxel ARPG".into(),
+                title: "Voxablo".into(),
                 resolution: (1280.0, 720.0).into(),
                 ..default()
             }),
@@ -357,7 +522,11 @@ fn main() {
         .add_audio_source::<sfx::SfxClip>()
         .add_event::<ChunksChanged>()
         .add_event::<falling::Blasted>()
-        .add_systems(Startup, (setup, sfx::load))
+        .init_resource::<feel::HitStop>()
+        .init_resource::<senses::Noises>()
+        .init_resource::<Nav>()
+        .init_resource::<director::Director>()
+        .add_systems(Startup, (setup, sfx::load, feel::setup_telegraphs, spawn_director_hud))
         .add_systems(
             Update,
             (
@@ -367,10 +536,14 @@ fn main() {
                 spells::fire_beam,
                 spells::beam_audio,
                 player_controller,
+                update_nav,
+                run_director,
                 update_enemies,
                 update_hostile_shots,
+                rubble_hits_player,
                 spells::update_projectiles,
                 spells::update_fire_orbs,
+                spells::run_detonations,
                 pose_rigs,
                 update_battle_hud,
             )
@@ -387,6 +560,11 @@ fn main() {
                 update_occluder_fade,
                 update_marker,
                 remesh_changed_chunks,
+                feel::attach_telegraphs,
+                feel::update_telegraphs,
+                feel::run_hit_stop,
+                sync_elite_look,
+                update_director_hud,
             )
                 .chain(),
         )
@@ -576,7 +754,7 @@ fn setup(
     });
     for (index, pos) in enemy_spawn_points(&world).into_iter().enumerate() {
         let species = species_at(index);
-        spawn_enemy(&mut commands, materials.add(species_material(species)), species, pos);
+        spawn_enemy(&mut commands, materials.add(species_material(species)), species, pos, traits_at(index));
     }
     for lamp in tristram::LAMPS {
         commands.spawn(PointLightBundle {
@@ -740,6 +918,16 @@ fn handle_input(
         }
     }
 
+    if keys.just_pressed(KeyCode::ControlLeft) {
+        let aim = cursor_ray(&windows, &cameras)
+            .and_then(|ray| voxels.with(|w| pick_voxel(w, ray)))
+            .map(|hit| (hit.voxel.as_vec3() + Vec3::splat(0.5)) * VOXEL_SIZE);
+        for mut player in &mut players {
+            let toward = aim.map_or(Vec3::ZERO, |point| Vec3::new(point.x - player.body.pos.x, 0.0, point.z - player.body.pos.z));
+            player.dash_request = Some(toward);
+        }
+    }
+
     if keys.just_pressed(KeyCode::KeyR) {
         let spawn = voxels.with(|w| {
             w.unload_region(REGION);
@@ -761,7 +949,7 @@ fn handle_input(
         for (index, ((_entity, mut enemy, mut anim, mut transform), pos)) in
             enemies.iter_mut().zip(enemy_spawns.iter().copied()).enumerate()
         {
-            *enemy = Enemy::of(species_at(index));
+            *enemy = Enemy::of(species_at(index)).with_traits(traits_at(index));
             *anim = CharacterAnim::default();
             transform.translation = pos;
             transform.scale = Vec3::ONE;
@@ -770,7 +958,7 @@ fn handle_input(
         if reset_count < enemy_spawns.len() {
             for (index, pos) in enemy_spawns.into_iter().enumerate().skip(reset_count) {
                 let species = species_at(index);
-                spawn_enemy(&mut commands, materials.add(species_material(species)), species, pos);
+                spawn_enemy(&mut commands, materials.add(species_material(species)), species, pos, traits_at(index));
             }
         }
         changed.send(ChunksChanged::all());
@@ -852,11 +1040,89 @@ struct HostileShot {
     prev: Vec3,
 }
 
-fn spawn_enemy(commands: &mut Commands, material: Handle<StandardMaterial>, species: Species, pos: Vec3) {
-    let glow = if species == Species::Fallen { 14_000.0 } else { 7_000.0 };
+/// Elite traits (Diablo's champion affixes), each one about destruction or the pack.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Traits {
+    /// Bursts after going down: a ring fills, then it craters the ground and hurts what is near.
+    volatile: bool,
+    /// Smashes through walls it is stuck against instead of walking round.
+    wallbreaker: bool,
+    /// A packmate dying nearby sends it into a frenzy: faster attacks, faster feet.
+    frenzied: bool,
+}
+
+impl Traits {
+    fn names(self) -> String {
+        [(self.volatile, "Volatile "), (self.wallbreaker, "Wallbreaker "), (self.frenzied, "Frenzied ")]
+            .into_iter()
+            .filter_map(|(on, name)| on.then_some(name))
+            .collect()
+    }
+}
+
+/// Roster slots that carry traits: volatile on a fallen and a zombie, wallbreaker on a skeleton
+/// and a fallen, frenzied on an archer and a skeleton.
+fn traits_at(index: usize) -> Traits {
+    Traits {
+        volatile: matches!(index, 4 | 10),
+        wallbreaker: matches!(index, 1 | 9),
+        frenzied: matches!(index, 7 | 12),
+    }
+}
+
+fn species_glow(species: Species) -> f32 {
+    if species == Species::Fallen {
+        14_000.0
+    } else {
+        7_000.0
+    }
+}
+
+/// Elites glow so the trait reads before the fight starts: volatile smoulders orange, a wallbreaker
+/// is steel blue, a frenzied body is blood red (brighter while the frenzy runs).
+/// Runs when the look changes, including after R reshuffles which body holds which roster slot.
+fn sync_elite_look(
+    mut materials: ResMut<Assets<StandardMaterial>>,
+    mut enemies: Query<(&Enemy, &BodyMaterial, &mut EliteLook, &Children)>,
+    mut lights: Query<&mut PointLight>,
+) {
+    for (enemy, body, mut look, children) in &mut enemies {
+        let shown = Traits { volatile: enemy.traits.volatile || enemy.volatile_fuse.is_some(), ..enemy.traits };
+        let raging = enemy.frenzy > 0.0;
+        let key = (shown, raging);
+        if look.0 == Some(key) {
+            continue;
+        }
+        look.0 = Some(key);
+        let species = enemy.species();
+        let glow = if shown.volatile {
+            Some((Color::rgb_linear(1.4, 0.45, 0.04), Color::rgb(1.0, 0.55, 0.1)))
+        } else if shown.wallbreaker {
+            Some((Color::rgb_linear(0.25, 0.5, 1.4), Color::rgb(0.45, 0.65, 1.0)))
+        } else if shown.frenzied {
+            let heat = if raging { 2.2 } else { 0.9 };
+            Some((Color::rgb_linear(1.2 * heat, 0.04, 0.04), Color::rgb(1.0, 0.1, 0.08)))
+        } else {
+            None
+        };
+        if let Some(material) = materials.get_mut(&body.0) {
+            material.emissive = glow.map_or(species_material(species).emissive, |(emissive, _)| emissive);
+        }
+        for &child in children.iter() {
+            if let Ok(mut light) = lights.get_mut(child) {
+                light.color = glow.map_or(species_light(species), |(_, light)| light);
+                light.intensity = species_glow(species) * if glow.is_some() { 2.2 } else { 1.0 };
+            }
+        }
+    }
+}
+
+fn spawn_enemy(commands: &mut Commands, material: Handle<StandardMaterial>, species: Species, pos: Vec3, traits: Traits) {
+    let glow = species_glow(species);
     commands
         .spawn((
-            Enemy::of(species),
+            Enemy::of(species).with_traits(traits),
+            EliteLook::default(),
             CharacterAnim::default(),
             BodyMaterial(material),
             SpatialBundle {
@@ -884,28 +1150,236 @@ fn update_enemies(
     arrows: Res<ArrowAssets>,
     mut commands: Commands,
     mut sfx: ResMut<sfx::SfxBank>,
+    mut hit_stop: ResMut<feel::HitStop>,
+    mut noises: ResMut<senses::Noises>,
+    mut blasts: EventReader<falling::Blasted>,
+    mut nav: ResMut<Nav>,
+    mut detonations: ResMut<spells::Detonations>,
+    director: Res<director::Director>,
+    orbs: Query<(&spells::FireOrb, &Transform), (Without<Enemy>, Without<Player>)>,
+    pieces: Query<&falling::FallingPiece>,
     mut players: Query<(&mut Player, &mut Transform), Without<Enemy>>,
     mut enemies: Query<(Entity, &mut Enemy, &mut CharacterAnim, &mut Transform), Without<Player>>,
 ) {
     let dt = time.delta_seconds().min(0.05);
     let enemy_positions: Vec<(Entity, Vec3)> = enemies.iter().map(|(entity, _, _, transform)| (entity, transform.translation)).collect();
+    let player_at = players.get_single().ok().map(|(_, transform)| transform.translation);
+    let mut heard = noises.drain();
+    heard.extend(blasts.read().map(|blast| senses::Noise::blast(blast.center * VOXEL_SIZE, blast.radius * VOXEL_SIZE)));
+    perceive(&mut enemies, player_at, &heard, &voxels, dt, &mut commands, &mut sfx, &mut noises);
+    assign_attack_tokens(&mut enemies, player_at, dt, director.mercy);
+    let player_forward = players.get_single().ok().map(|(player, _)| combat::forward_from_yaw(player.facing));
+    // Alert, standing, unafraid bodies: who can cover whom, and where to fall back to.
+    let allies: Vec<(Entity, Vec3)> = enemies
+        .iter()
+        .filter(|(_, enemy, _, _)| !enemy.is_down() && enemy.senses.is_alert() && !enemy.senses.fleeing())
+        .map(|(entity, _, _, transform)| (entity, transform.translation))
+        .collect();
+    let mut flank_barked = false;
+    // Orbs about to burst, archers a shield could cover, and rubble moving fast enough to hurt.
+    let dangers: Vec<(Vec3, f32)> = orbs
+        .iter()
+        .filter_map(|(orb, transform)| {
+            let (fuse, reach) = orb.danger();
+            (fuse < ORB_DODGE_FUSE).then_some((transform.translation, reach + ORB_DODGE_MARGIN))
+        })
+        .collect();
+    let archers: Vec<Vec3> = enemies
+        .iter()
+        .filter(|(_, enemy, _, _)| enemy.senses.is_alert() && enemy.fighter.wants_token() == Some(true))
+        .map(|(_, _, _, transform)| transform.translation)
+        .collect();
+    let rubble: Vec<&falling::FallingPiece> = pieces.iter().filter(|piece| piece.speed() > RUBBLE_MIN_SPEED).collect();
     for (entity, mut enemy, mut anim, mut transform) in &mut enemies {
         let mut movement = Vec3::ZERO;
         let mut face_yaw = None;
-        if !enemy.is_down() {
+        // Speed the body is trying to flee at, to notice when it is cornered.
+        let mut flee_speed = 0.0;
+        let mut idle = false;
+        let distance = player_at.map_or(f32::MAX, |player| {
+            Vec2::new(player.x - transform.translation.x, player.z - transform.translation.z).length()
+        });
+        let can_dodge = !enemy.is_down() && enemy.senses.is_alert() && !enemy.fighter.is_staggered() && enemy.fighter.move_speed() > 0.0;
+        let dodge = dangers
+            .iter()
+            .filter(|_| can_dodge)
+            .filter_map(|(at, reach)| {
+                let away = Vec3::new(transform.translation.x - at.x, 0.0, transform.translation.z - at.z);
+                (away.length() < *reach).then(|| away.try_normalize().unwrap_or(Vec3::X))
+            })
+            .reduce(|a, b| (a + b).try_normalize().unwrap_or(a));
+        let engaged = !enemy.is_down() && player_at.is_some() && enemy.senses.engaged(distance) && dodge.is_none();
+        if engaged {
+            // In sight again: the old firing spot no longer matters.
+            enemy.perch = None;
+        }
+        if let Some(away) = dodge {
+            // Drop the swing and get clear of the fuse.
+            enemy.fighter.calm();
+            flee_speed = (enemy.fighter.move_speed() * 1.5).max(1.0);
+            movement += away * flee_speed;
+        } else if !enemy.is_down() && !engaged {
+            enemy.fighter.calm();
+            let pos = transform.translation;
+            let speed = enemy.fighter.move_speed();
+            // The maps are built around the player, so they only guide moves that are about the player.
+            let near_player = |spot: Vec3| player_at.is_some_and(|player| player.distance(spot) < NAV_TRUST_RADIUS);
+            let archer = enemy.fighter.wants_token() == Some(true);
+            if enemy.senses.fleeing() {
+                let fallback = Vec3::new((entity.index() as f32).cos(), 0.0, (entity.index() as f32).sin());
+                flee_speed = (speed * 1.4).max(0.6);
+                // A maimed body limps for the nearest roof; a scattering fallen just runs.
+                let routed = if enemy.senses.maimed_fled {
+                    nav.shelter_step(pos)
+                } else if near_player(enemy.senses.flee_from) {
+                    nav.flee_step(pos)
+                } else {
+                    None
+                };
+                let dir = routed.unwrap_or_else(|| enemy.senses.flee_direction(pos, fallback));
+                movement += dir * flee_speed;
+            } else if let (true, true, Some(player)) = (archer, enemy.senses.is_alert(), player_at) {
+                // An archer that lost sight looks for a spot with a clear shot instead of chasing.
+                enemy.perch_timer -= dt;
+                if enemy.perch.is_none() || enemy.perch_timer <= 0.0 {
+                    enemy.perch_timer = PERCH_RETHINK;
+                    enemy.perch = voxels.with(|w| choose_perch(w, &nav, pos, player));
+                }
+                let goal = enemy.perch.or(enemy.senses.last_known).unwrap_or(player);
+                let to_goal = Vec3::new(goal.x - pos.x, 0.0, goal.z - pos.z);
+                if to_goal.length() > 0.6 {
+                    let dir = nav.route_step(pos, goal, player_at).unwrap_or_else(|| to_goal.normalize());
+                    movement += dir * speed;
+                }
+            } else if let Some(goal) = enemy.senses.last_known {
+                // Search: walk to where the player was last sensed, then give up the trail.
+                let to_goal = Vec3::new(goal.x - pos.x, 0.0, goal.z - pos.z);
+                if to_goal.length() > 0.8 {
+                    let routed = nav.route_step(pos, goal, player_at);
+                    let dir = routed.unwrap_or_else(|| to_goal.normalize());
+                    movement += dir * speed * 0.85;
+                    if enemy.unstick > 0.0 && routed.is_none() {
+                        // Stuck on a trail the map can't help with: let it go.
+                        enemy.senses.last_known = None;
+                    }
+                } else {
+                    enemy.senses.last_known = None;
+                }
+            } else {
+                idle = true;
+            }
+        }
+        if engaged {
             if let Ok((mut player, mut player_transform)) = players.get_single_mut() {
                 let player_pos = player_transform.translation;
-                let to_player = Vec3::new(player_pos.x - transform.translation.x, 0.0, player_pos.z - transform.translation.z);
-                let distance = to_player.length();
-                if distance < ENEMY_AGGRO_RANGE {
-                    let plan = plan_fight(&mut enemy.fighter, dt, transform.translation, player_pos);
-                    movement += plan.velocity;
-                    face_yaw = Some(plan.yaw);
+                {
+                    let side = if entity.index() % 2 == 0 { 1.0 } else { -1.0 };
+                    let haste = if enemy.frenzy > 0.0 { FRENZY_HASTE } else { 1.0 };
+                    let engage = Engage { may_attack: enemy.token, side, cornered: enemy.unstick > 0.0, haste };
+                    let plan = plan_fight_engaged(&mut enemy.fighter, dt, transform.translation, player_pos, engage);
+                    if plan.attack_finished && enemy.token {
+                        enemy.token = false;
+                        enemy.token_rest = TOKEN_REST;
+                    }
+                    // When the straight line is blocked (the walking route is much longer than the gap,
+                    // or the body is stuck), follow the map instead of pressing into the wall.
+                    // Only moves toward the player are routed; an archer backing off keeps backing off.
+                    let pos = transform.translation;
+                    let toward = Vec3::new(player_pos.x - pos.x, 0.0, player_pos.z - pos.z).normalize_or_zero();
+                    let approaching = plan.velocity.dot(toward) >= -0.1;
+                    let detour = nav.chase_length(pos).is_some_and(|path| path > distance * 1.25 + 1.0);
+                    let routed = if !plan.winding_up && approaching && (detour || enemy.unstick > 0.0) {
+                        nav.chase_step(pos)
+                    } else {
+                        None
+                    };
+                    // Reconsider what to want: press, hold, flank, or fall back.
+                    enemy.rethink -= dt;
+                    if enemy.rethink <= 0.0 {
+                        enemy.rethink = utility::RETHINK_SECONDS;
+                        let others = allies.iter().filter(|(other, _)| *other != entity);
+                        let allies_near = others.clone().filter(|(_, at)| at.distance(pos) < ALLY_NEAR).count() as u32;
+                        let away_from_player = Vec3::new(pos.x - player_pos.x, 0.0, pos.z - player_pos.z).normalize_or_zero();
+                        let situation = utility::Situation {
+                            distance,
+                            integrity: enemy.fighter.parts_left() as f32 / enemy.full_parts.max(1) as f32,
+                            allies_near,
+                            ally_anywhere: others.count() > 0,
+                            has_token: enemy.token,
+                            facing_me: player_forward.map_or(0.0, |forward| forward.dot(away_from_player)),
+                            ranged: enemy.fighter.wants_token() == Some(true),
+                            mindless: enemy.species() == Species::Zombie,
+                        };
+                        let next = utility::choose(enemy.intent, &situation);
+                        if next == utility::Intent::Flank && enemy.intent != utility::Intent::Flank && !flank_barked {
+                            // Say it out loud, so the player hears the plan before seeing it.
+                            sfx.play_scaled(&mut commands, sfx::Cue::Bark, 0.55);
+                            flank_barked = true;
+                        }
+                        enemy.intent = next;
+                    }
+                    let flank = (enemy.intent == utility::Intent::Flank && !plan.winding_up)
+                        .then_some(player_forward)
+                        .flatten()
+                        .map(|forward| {
+                            let side = Vec3::new(-forward.z, 0.0, forward.x) * if entity.index() % 2 == 0 { 1.0 } else { -1.0 };
+                            player_pos + (-forward * 0.6 + side * 0.8).normalize() * FLANK_DISTANCE
+                        });
+                    let regroup = if enemy.intent == utility::Intent::Regroup {
+                        allies
+                            .iter()
+                            .filter(|(other, _)| *other != entity)
+                            .map(|(_, at)| *at)
+                            .min_by(|a, b| a.distance(pos).total_cmp(&b.distance(pos)))
+                    } else {
+                        None
+                    };
+                    // A shielded skeleton waiting its turn stands between the player and an archer.
+                    let shielded = enemy.species() == Species::Skeleton && enemy.fighter.attached(Part::LeftArm);
+                    let holding = enemy.intent == utility::Intent::Hold;
+                    let screen = if shielded && holding && !enemy.token && !plan.winding_up {
+                        archers
+                            .iter()
+                            .filter(|archer| archer.distance(pos) < SCREEN_RANGE)
+                            .min_by(|a, b| a.distance(pos).total_cmp(&b.distance(pos)))
+                            .map(|archer| {
+                                let line = Vec3::new(archer.x - player_pos.x, 0.0, archer.z - player_pos.z).normalize_or_zero();
+                                player_pos + line * SCREEN_DISTANCE
+                            })
+                    } else {
+                        None
+                    };
+                    if let Some(ally) = regroup {
+                        let to_ally = Vec3::new(ally.x - pos.x, 0.0, ally.z - pos.z);
+                        if to_ally.length() > REGROUP_DISTANCE {
+                            let dir = nav.route_step(pos, ally, Some(player_pos)).unwrap_or_else(|| to_ally.normalize());
+                            movement += dir * enemy.fighter.move_speed();
+                        }
+                    } else if let Some(dir) = routed {
+                        movement += dir * enemy.fighter.move_speed();
+                    } else if let Some(spot) = flank {
+                        let to_spot = Vec3::new(spot.x - pos.x, 0.0, spot.z - pos.z);
+                        if to_spot.length() > 0.4 {
+                            movement += to_spot.normalize() * enemy.fighter.move_speed();
+                        }
+                        face_yaw = Some(plan.yaw);
+                    } else if let Some(spot) = screen {
+                        let to_spot = Vec3::new(spot.x - pos.x, 0.0, spot.z - pos.z);
+                        if to_spot.length() > 0.4 {
+                            movement += to_spot.normalize() * enemy.fighter.move_speed();
+                        }
+                        // Keep the shield toward the player while moving across.
+                        face_yaw = Some(plan.yaw);
+                    } else {
+                        movement += plan.velocity;
+                        face_yaw = Some(plan.yaw);
+                    }
                     movement += separation_push(transform.translation, player_pos, PLAYER_SEPARATION_RADIUS) * 2.0;
                     if plan.strike_damage > 0.0 && player.invuln <= 0.0 {
                         let killed = player.health <= plan.strike_damage;
                         player.health -= plan.strike_damage;
                         player.invuln = HIT_INVULN;
+                        hit_stop.kick(feel::STOP_PLAYER_HURT);
                         if enemy.species() == Species::Zombie {
                             player.poison = ZOMBIE_POISON_SECONDS;
                         }
@@ -951,10 +1425,17 @@ fn update_enemies(
                 }
             }
         }
-        if face_yaw.is_none() && !enemy.is_down() {
+        if idle {
             let wander = Vec3::new((anim.phase * TAU + entity.index() as f32).cos(), 0.0, (anim.phase * TAU * 0.7).sin());
             movement += wander.normalize_or_zero() * 0.8;
         }
+        // Unstuck with no route: slide sideways along whatever is in the way.
+        if enemy.unstick > 0.0 && movement.length_squared() > 0.01 && !enemy.is_down() {
+            let side = if entity.index() % 2 == 0 { 1.0 } else { -1.0 };
+            movement += Vec3::new(-movement.z, 0.0, movement.x) * side * 0.6;
+        }
+        let intent = movement.length();
+        let heading = movement.normalize_or_zero();
         for (other, other_pos) in &enemy_positions {
             if *other != entity && !enemy.is_down() {
                 movement += separation_push(transform.translation, *other_pos, ENEMY_SEPARATION_RADIUS) * 2.0;
@@ -966,10 +1447,60 @@ fn update_enemies(
         transform.translation = stepped;
         let horizontal = Vec3::new(stepped.x - before.x, 0.0, stepped.z - before.z);
         anim.speed = horizontal.length() / dt.max(0.0001);
+        enemy.senses.tick_fear(dt, flee_speed, anim.speed);
+        // Trying to move and barely moving: switch to the map for a moment.
+        enemy.unstick = (enemy.unstick - dt).max(0.0);
+        enemy.frenzy = (enemy.frenzy - dt).max(0.0);
+        enemy.smash_cooldown = (enemy.smash_cooldown - dt).max(0.0);
+        if intent > 0.4 && anim.speed < intent * 0.25 {
+            enemy.stuck += dt;
+            if enemy.traits.wallbreaker && !enemy.is_down() && enemy.stuck > SMASH_AFTER_STUCK && enemy.smash_cooldown <= 0.0 {
+                // Through it, not round it.
+                enemy.stuck = 0.0;
+                enemy.smash_cooldown = SMASH_COOLDOWN;
+                detonations.0.push(spells::Detonation {
+                    center: transform.translation + Vec3::Y * 0.9 + heading * 0.55,
+                    radius: SMASH_RADIUS,
+                    energy: SMASH_ENERGY,
+                    enemy_damage: 0.0,
+                    quiet: true,
+                });
+            } else if enemy.stuck > STUCK_LIMIT {
+                enemy.stuck = 0.0;
+                enemy.unstick = UNSTICK_SECONDS;
+            }
+        } else {
+            enemy.stuck = (enemy.stuck - dt).max(0.0);
+        }
         if let Some(yaw) = face_yaw {
             transform.rotation = Quat::from_rotation_y(yaw);
         } else if horizontal.length_squared() > 0.0001 {
             transform.rotation = Quat::from_rotation_y(f32::atan2(-horizontal.x, -horizontal.z));
+        }
+
+        // Rubble moving fast enough hurts the part it meets, and shoves the body along with it.
+        enemy.rubble_cooldown = (enemy.rubble_cooldown - dt).max(0.0);
+        if !enemy.is_down() && enemy.rubble_cooldown <= 0.0 {
+            let feet = transform.translation;
+            let body = feet + Vec3::Y * ENEMY_BODY_CENTER_Y;
+            for piece in &rubble {
+                if piece.center().distance(body) > piece.radius() + 1.0 {
+                    continue;
+                }
+                let contact = piece.nearest_surface_point(body);
+                let flat = Vec2::new(contact.x - feet.x, contact.z - feet.z).length();
+                if flat > 0.45 || contact.y < feet.y - 0.05 || contact.y > feet.y + ENEMY_BODY.height {
+                    continue;
+                }
+                let heft = (piece.voxel_count() as f32 / 40.0).sqrt().clamp(0.6, 3.0);
+                let damage = ((piece.speed() - RUBBLE_MIN_SPEED) * 7.0 * heft).min(110.0);
+                enemy.damage_area(damage, contact, 0.35, &transform);
+                let shove = Vec3::new(piece.velocity().x, 0.0, piece.velocity().z).normalize_or_zero() * 0.25;
+                transform.translation = voxels.with(|w| walk_step(feet, shove, &ENEMY_BODY, &|v| is_solid(w, v)));
+                sfx.play(&mut commands, sfx::Cue::Hit);
+                enemy.rubble_cooldown = RUBBLE_COOLDOWN;
+                break;
+            }
         }
 
         if enemy.hits() != anim.last_hits {
@@ -977,8 +1508,476 @@ fn update_enemies(
         }
         anim.last_hits = enemy.hits();
         anim.hurt = (anim.hurt - dt * 4.0).max(0.0);
+        if enemy.fighter.is_staggered() {
+            anim.hurt = anim.hurt.max(0.7);
+        }
+
+        // Freeze once per event that changes the fight, never per beam tick.
+        let parts = enemy.fighter.parts_left();
+        let staggered = enemy.fighter.is_staggered();
+        let down = enemy.is_down();
+        if down && !enemy.seen_down {
+            hit_stop.kick(feel::STOP_DOWN);
+            if enemy.traits.volatile {
+                // The wreck smoulders: a ring fills on the ground, then it bursts.
+                enemy.traits.volatile = false;
+                enemy.volatile_fuse = Some(VOLATILE_FUSE);
+                sfx.play(&mut commands, sfx::Cue::FireCast);
+            }
+            // The death cry tells the pack where the killer is, and frightens fallen next update.
+            noises.emit(senses::Noise {
+                at: transform.translation,
+                radius: senses::DEATH_NOISE_RADIUS,
+                kind: senses::NoiseKind::Death,
+                reveals: player_at,
+            });
+        } else if parts < enemy.seen_parts {
+            hit_stop.kick(feel::STOP_SEVER);
+            // Left with no arms, some bodies lose their nerve. Zombies don't have any.
+            let armless = !enemy.fighter.attached(Part::LeftArm) && !enemy.fighter.attached(Part::RightArm);
+            let nerve_breaks = entity.index() % 2 == 0 && enemy.species() != Species::Zombie;
+            if armless && nerve_breaks && !enemy.senses.maimed_fled {
+                enemy.senses.maimed_fled = true;
+                let from = player_at.unwrap_or(transform.translation);
+                if enemy.senses.frighten(from, senses::MAIMED_FEAR_SECONDS) {
+                    sfx.play(&mut commands, sfx::Cue::Shriek);
+                }
+            }
+        } else if staggered && !enemy.seen_stagger {
+            hit_stop.kick(feel::STOP_STAGGER);
+        }
+        enemy.seen_parts = parts;
+        enemy.seen_stagger = staggered;
+        enemy.seen_down = down;
+
+        if let Some(left) = enemy.volatile_fuse {
+            let left = left - dt;
+            if left > 0.0 {
+                enemy.volatile_fuse = Some(left);
+            } else {
+                enemy.volatile_fuse = None;
+                let center = transform.translation + Vec3::Y * 0.6;
+                detonations.0.push(spells::Detonation {
+                    center,
+                    radius: VOLATILE_RADIUS,
+                    energy: VOLATILE_ENERGY,
+                    enemy_damage: VOLATILE_ENEMY_DAMAGE,
+                    quiet: false,
+                });
+                if let Ok((mut player, player_transform)) = players.get_single_mut() {
+                    let offset = player_transform.translation - transform.translation;
+                    let reach = VOLATILE_RADIUS * VOXEL_SIZE + 0.3;
+                    if Vec2::new(offset.x, offset.z).length() < reach && player.invuln <= 0.0 {
+                        player.health -= VOLATILE_PLAYER_DAMAGE;
+                        player.invuln = HIT_INVULN;
+                        player.shove = Vec3::new(offset.x, 0.0, offset.z).normalize_or_zero() * 5.0;
+                        player.recoil = 0.22;
+                        hit_stop.kick(feel::STOP_PLAYER_HURT);
+                        sfx.play(&mut commands, sfx::Cue::Hurt);
+                    }
+                }
+            }
+        }
         // Wrecks flatten on the root. The walk itself lives on the rig, not a mesh scale.
         transform.scale = if enemy.is_down() { Vec3::new(1.18, 0.34, 1.18) } else { Vec3::ONE };
+    }
+}
+
+#[derive(Component)]
+struct DirectorHud;
+
+fn spawn_director_hud(mut commands: Commands) {
+    commands.spawn((
+        DirectorHud,
+        TextBundle::from_section("", TextStyle { font_size: 15.0, color: Color::rgb(0.75, 0.95, 0.8), ..default() })
+            .with_style(Style { position_type: PositionType::Absolute, top: Val::Px(10.0), right: Val::Px(12.0), ..default() })
+            .with_background_color(Color::rgba(0.0, 0.0, 0.0, 0.55)),
+    ))
+    .insert(Visibility::Hidden);
+}
+
+/// F3: the director's pacing and every body's state, for tuning by eye.
+fn update_director_hud(
+    keys: Res<ButtonInput<KeyCode>>,
+    director: Res<director::Director>,
+    players: Query<&Transform, With<Player>>,
+    enemies: Query<(&Enemy, &Transform)>,
+    mut huds: Query<(&mut Text, &mut Visibility), With<DirectorHud>>,
+) {
+    let Ok((mut text, mut visibility)) = huds.get_single_mut() else { return };
+    if keys.just_pressed(KeyCode::F3) {
+        *visibility = if *visibility == Visibility::Hidden { Visibility::Inherited } else { Visibility::Hidden };
+    }
+    if *visibility == Visibility::Hidden {
+        return;
+    }
+    let at = players.get_single().map(|transform| transform.translation).unwrap_or(Vec3::ZERO);
+    let (mut engaged, mut searching, mut unaware, mut panicking, mut down) = (0, 0, 0, 0, 0);
+    let mut held = [0usize; 2];
+    let mut intents = [0usize; 4];
+    for (enemy, transform) in &enemies {
+        let distance = Vec2::new(transform.translation.x - at.x, transform.translation.z - at.z).length();
+        if enemy.is_down() {
+            down += 1;
+            continue;
+        }
+        if enemy.senses.fleeing() {
+            panicking += 1;
+        } else if enemy.senses.engaged(distance) {
+            engaged += 1;
+            intents[enemy.intent as usize] += 1;
+        } else if enemy.senses.is_alert() {
+            searching += 1;
+        } else {
+            unaware += 1;
+        }
+        if enemy.token {
+            held[(enemy.fighter.wants_token() == Some(true)) as usize] += 1;
+        }
+    }
+    let bar: String = (0..10).map(|i| if (i as f32) < director.intensity * 10.0 { '#' } else { '.' }).collect();
+    let melee_pool = if director.mercy { 1 } else { TOKEN_POOL[0] };
+    let wave = director.next_wave_in();
+    let wave = if wave.is_finite() { format!("{:.1} s", wave.max(0.0)) } else { "held".into() };
+    let line = format!(
+        "DIRECTOR [F3]\n\
+         phase      {:?}  {:.1} s\n\
+         intensity  [{bar}] {:.2}\n\
+         mercy      {}   next wave {wave}\n\
+         bodies     engaged {engaged}  searching {searching}  unaware {unaware}  panicking {panicking}  down {down}\n\
+         tokens     melee {}/{melee_pool}  ranged {}/{}\n\
+         intents    press {}  hold {}  flank {}  fall back {}",
+        director.phase,
+        director.phase_time(),
+        director.intensity,
+        if director.mercy { "ON " } else { "off" },
+        held[0],
+        held[1],
+        TOKEN_POOL[1],
+        intents[utility::Intent::Press as usize],
+        intents[utility::Intent::Hold as usize],
+        intents[utility::Intent::Flank as usize],
+        intents[utility::Intent::Regroup as usize],
+    );
+    if text.sections[0].value != line {
+        text.sections[0].value = line;
+    }
+}
+
+/// Pacing (Left 4 Dead's director). Reads how hard the fight is; in a quiet build-up it has the
+/// unaware body nearest the player call its pack in, so the next fight arrives as a wave.
+fn run_director(
+    time: Res<Time>,
+    mut director: ResMut<director::Director>,
+    mut noises: ResMut<senses::Noises>,
+    players: Query<(&Player, &Transform)>,
+    enemies: Query<(&Enemy, &Transform)>,
+) {
+    let Ok((player, player_transform)) = players.get_single() else { return };
+    let at = player_transform.translation;
+    let flat_distance = |pos: Vec3| Vec2::new(pos.x - at.x, pos.z - at.z).length();
+    let engaged = enemies
+        .iter()
+        .filter(|(enemy, transform)| !enemy.is_down() && enemy.senses.engaged(flat_distance(transform.translation)))
+        .count() as u32;
+    let sleeper = enemies
+        .iter()
+        .filter(|(enemy, transform)| !enemy.is_down() && !enemy.senses.is_alert() && flat_distance(transform.translation) < NUDGE_RANGE)
+        .map(|(_, transform)| transform.translation)
+        .min_by(|a, b| flat_distance(*a).total_cmp(&flat_distance(*b)));
+    let before = director.phase;
+    let order = director.tick(time.delta_seconds(), player.health, engaged, sleeper.is_some());
+    if director.phase != before {
+        debug!("director: {:?} -> {:?} (intensity {:.2})", before, director.phase, director.intensity);
+    }
+    if let (director::Order::Nudge, Some(waking)) = (order, sleeper) {
+        debug!("director: waking the group at {waking}");
+        noises.emit(senses::Noise {
+            at: waking,
+            radius: senses::PACK_CALL_RADIUS,
+            kind: senses::NoiseKind::Call,
+            reveals: Some(at),
+        });
+    }
+}
+
+/// Sight, hearing, and nerve for every body, before anyone moves. A body that spots the player
+/// growls and calls its pack; one heard only through a call stays quiet, so a group barks once.
+#[allow(clippy::too_many_arguments)]
+fn perceive(
+    enemies: &mut Query<(Entity, &mut Enemy, &mut CharacterAnim, &mut Transform), Without<Player>>,
+    player_at: Option<Vec3>,
+    heard: &[senses::Noise],
+    voxels: &Voxels,
+    dt: f32,
+    commands: &mut Commands,
+    sfx: &mut sfx::SfxBank,
+    noises: &mut senses::Noises,
+) {
+    let mut barked = false;
+    let mut shrieked = false;
+    for (_, mut enemy, _, transform) in enemies.iter_mut() {
+        if enemy.is_down() {
+            enemy.senses = senses::Awareness::default();
+            continue;
+        }
+        let pos = transform.translation;
+        let species = enemy.species();
+        let mut spotted = false;
+        if let Some(player) = player_at {
+            let facing = transform.rotation * Vec3::NEG_Z;
+            let eye = pos + Vec3::Y * ENEMY_EYE_Y;
+            let chest = player + Vec3::Y * PLAYER_CHEST_Y;
+            spotted = enemy.senses.look(dt, pos, facing, player, || voxels.with(|w| line_clear(w, eye, chest)));
+        }
+        for noise in heard {
+            let death = noise.kind == senses::NoiseKind::Death;
+            if death && enemy.traits.frenzied && noise.at.distance(pos) < FRENZY_RADIUS {
+                // The opposite of a fallen's nerve: a death nearby makes it worse.
+                if enemy.frenzy <= 0.0 && !barked {
+                    sfx.play(commands, sfx::Cue::Bark);
+                    barked = true;
+                }
+                enemy.frenzy = FRENZY_SECONDS;
+            }
+            if death && senses::scared_by_death(species, pos, noise.at) {
+                if enemy.senses.frighten(noise.at, senses::FEAR_SECONDS) && !shrieked {
+                    sfx.play(commands, sfx::Cue::Shriek);
+                    shrieked = true;
+                }
+            }
+            enemy.senses.hear(pos, noise);
+        }
+        if spotted {
+            if !barked {
+                sfx.play(commands, sfx::Cue::Bark);
+                barked = true;
+            }
+            noises.emit(senses::Noise {
+                at: pos,
+                radius: senses::PACK_CALL_RADIUS,
+                kind: senses::NoiseKind::Call,
+                reveals: player_at,
+            });
+        }
+    }
+}
+
+/// Navigation graph plus the Dijkstra maps toward (chase) and away from (flee) the player.
+#[derive(Resource, Default)]
+struct Nav {
+    grid: Option<nav::NavGrid>,
+    chase: Vec<f32>,
+    flee: Option<Vec<f32>>,
+    goal: Option<usize>,
+    stale: bool,
+    /// Seconds since the last fill. A sprint crosses cells faster than refilling is worth.
+    since_fill: f32,
+    /// Maps toward goals other than the player, most recently used last. A pack searching the same
+    /// spot shares one map.
+    goal_maps: Vec<(usize, Vec<f32>)>,
+    shelter: Option<Vec<f32>>,
+    /// Goal maps built this frame; each costs about 2 ms.
+    built_this_frame: u32,
+}
+
+/// Goal maps kept at once, and built per frame at most.
+const GOAL_MAP_CACHE: usize = 8;
+const GOAL_MAPS_PER_FRAME: u32 = 2;
+
+/// A fill costs about 2 ms on the town grid; a moving player refills at most this often.
+const NAV_REFILL_SECONDS: f32 = 0.12;
+
+impl Nav {
+    fn chase_step(&self, pos: Vec3) -> Option<Vec3> {
+        let grid = self.grid.as_ref()?;
+        (!self.chase.is_empty()).then(|| grid.next_step(&self.chase, pos)).flatten()
+    }
+
+    /// Walking metres from `pos` to the player, if there is a route.
+    fn chase_length(&self, pos: Vec3) -> Option<f32> {
+        let grid = self.grid.as_ref()?;
+        (!self.chase.is_empty()).then(|| grid.value_at(&self.chase, pos)).flatten()
+    }
+
+    /// Next step toward any goal. Goals near the player use the chase map; others get a cached
+    /// map of their own, built within a per-frame budget (None until there is room to build it).
+    fn route_step(&mut self, pos: Vec3, goal: Vec3, player_at: Option<Vec3>) -> Option<Vec3> {
+        if player_at.is_some_and(|player| player.distance(goal) < NAV_TRUST_RADIUS) {
+            return self.chase_step(pos);
+        }
+        let grid = self.grid.as_ref()?;
+        let (target, _) = grid.floor_near(goal)?;
+        let index = match self.goal_maps.iter().position(|(node, _)| *node == target) {
+            Some(index) => index,
+            None => {
+                if self.built_this_frame >= GOAL_MAPS_PER_FRAME {
+                    return None;
+                }
+                self.built_this_frame += 1;
+                if self.goal_maps.len() >= GOAL_MAP_CACHE {
+                    self.goal_maps.remove(0);
+                }
+                self.goal_maps.push((target, grid.chase_map(target)));
+                self.goal_maps.len() - 1
+            }
+        };
+        let entry = self.goal_maps.remove(index);
+        let step = grid.next_step(&entry.1, pos);
+        self.goal_maps.push(entry);
+        step
+    }
+
+    /// Next step toward the nearest floor under a roof, if one can be reached.
+    fn shelter_step(&mut self, pos: Vec3) -> Option<Vec3> {
+        let grid = self.grid.as_ref()?;
+        let shelter = self.shelter.get_or_insert_with(|| grid.shelter_map());
+        grid.next_step(shelter, pos)
+    }
+
+    fn flee_step(&mut self, pos: Vec3) -> Option<Vec3> {
+        let grid = self.grid.as_ref()?;
+        if self.chase.is_empty() {
+            return None;
+        }
+        let flee = self.flee.get_or_insert_with(|| grid.flee_map(&self.chase));
+        grid.next_step(flee, pos)
+    }
+}
+
+/// Build the graph once, rebuild the cells under every chunk edit, and refill the maps whenever
+/// the player reaches a new floor cell or the graph changed.
+fn update_nav(
+    time: Res<Time>,
+    voxels: Res<Voxels>,
+    mut nav: ResMut<Nav>,
+    mut changed: EventReader<ChunksChanged>,
+    players: Query<&Transform, With<Player>>,
+) {
+    if nav.grid.is_none() {
+        let started = std::time::Instant::now();
+        let cells_x = GRID * CHUNK_SIZE / nav::CELL;
+        let cells_z = GRID_Z * CHUNK_SIZE / nav::CELL;
+        let height = VERTICAL_CHUNKS * CHUNK_SIZE;
+        nav.grid = Some(voxels.with(|w| nav::NavGrid::build(cells_x, cells_z, height, &|v| is_solid(w, v))));
+        info!("nav: built {cells_x}x{cells_z} cells in {:.1} ms", started.elapsed().as_secs_f32() * 1000.0);
+        changed.clear();
+        nav.stale = true;
+    }
+    let edits: Vec<(IVec3, IVec3)> = changed.read().map(|edit| (edit.min * CHUNK_SIZE, (edit.max + IVec3::ONE) * CHUNK_SIZE - IVec3::ONE)).collect();
+    if !edits.is_empty() {
+        let started = std::time::Instant::now();
+        let grid = nav.grid.as_mut().expect("built above");
+        voxels.with(|w| {
+            for (min, max) in &edits {
+                let (lo, hi) = nav::NavGrid::cells_for_voxels(*min, *max);
+                grid.rebuild(lo, hi, &|v| is_solid(w, v));
+            }
+        });
+        debug!("nav: rebuilt {} edits in {:.1} ms", edits.len(), started.elapsed().as_secs_f32() * 1000.0);
+        nav.stale = true;
+        // Every cached map may route through what just changed.
+        nav.goal_maps.clear();
+        nav.shelter = None;
+    }
+    nav.built_this_frame = 0;
+    nav.since_fill += time.delta_seconds();
+    let Ok(player) = players.get_single() else { return };
+    let Some(goal) = nav.grid.as_ref().and_then(|grid| grid.node_at(player.translation)) else { return };
+    let moved = nav.goal != Some(goal) && nav.since_fill >= NAV_REFILL_SECONDS;
+    if nav.stale || moved {
+        let chase = nav.grid.as_ref().expect("built above").chase_map(goal);
+        nav.chase = chase;
+        nav.flee = None;
+        nav.goal = Some(goal);
+        nav.stale = false;
+        nav.since_fill = 0.0;
+    }
+}
+
+/// A floor on a ring around the player with a clear shot at them and a route there, closest to the
+/// archer, preferring its favourite range. None when nothing on the rings qualifies.
+fn choose_perch(world: &VoxelWorld, nav: &Nav, archer: Vec3, player: Vec3) -> Option<Vec3> {
+    let grid = nav.grid.as_ref()?;
+    let chest = player + Vec3::Y * PLAYER_CHEST_Y;
+    let mut best: Option<(f32, Vec3)> = None;
+    for ring in PERCH_RINGS {
+        for spot in 0..PERCH_SPOTS {
+            let angle = TAU * spot as f32 / PERCH_SPOTS as f32;
+            let around = player + Vec3::new(angle.cos(), 0.0, angle.sin()) * ring;
+            let Some((_, floor)) = grid.floor_near(around) else { continue };
+            if (floor.y - player.y).abs() > PERCH_MAX_RISE || nav.chase_length(floor).is_none() {
+                continue;
+            }
+            if !line_clear(world, floor + Vec3::Y * ENEMY_EYE_Y, chest) {
+                continue;
+            }
+            let score = archer.distance(floor) + (ring - 7.5).abs() * 0.5;
+            if best.map_or(true, |(had, _)| score < had) {
+                best = Some((score, floor));
+            }
+        }
+    }
+    best.map(|(_, floor)| floor)
+}
+
+/// No solid voxel between two points, in metres.
+fn line_clear(world: &VoxelWorld, from: Vec3, to: Vec3) -> bool {
+    let delta = to - from;
+    let length = delta.length();
+    if length < 1.0e-3 {
+        return true;
+    }
+    raycast(from / VOXEL_SIZE, delta / length, length / VOXEL_SIZE, |v| is_solid(world, v)).is_none()
+}
+
+/// Shared attack tokens (Doom 2016). Holders keep theirs through windup and recovery; free slots
+/// go to the nearest waiting body, preferring ones that did not just attack. The rest circle.
+/// With `mercy`, only one melee body may swing at a time; tokens already held run out normally.
+fn assign_attack_tokens(
+    enemies: &mut Query<(Entity, &mut Enemy, &mut CharacterAnim, &mut Transform), Without<Player>>,
+    player_at: Option<Vec3>,
+    dt: f32,
+    mercy: bool,
+) {
+    let pools = if mercy { [1, TOKEN_POOL[1]] } else { TOKEN_POOL };
+    let mut held = [0usize; 2];
+    let mut waiting: Vec<(Entity, f32, usize)> = Vec::new();
+    for (entity, mut enemy, _, transform) in enemies.iter_mut() {
+        enemy.token_rest = (enemy.token_rest - dt).max(0.0);
+        let distance = player_at.map_or(f32::MAX, |player| {
+            Vec2::new(player.x - transform.translation.x, player.z - transform.translation.z).length()
+        });
+        let regrouping = enemy.intent == utility::Intent::Regroup;
+        let class = enemy.fighter.wants_token().filter(|_| enemy.senses.engaged(distance) && !regrouping);
+        let Some(ranged) = class else {
+            enemy.token = false;
+            enemy.token_held = 0.0;
+            continue;
+        };
+        let pool = ranged as usize;
+        if enemy.token {
+            enemy.token_held += dt;
+            if enemy.token_held <= TOKEN_TIMEOUT || enemy.fighter.mid_attack() {
+                held[pool] += 1;
+                continue;
+            }
+            enemy.token = false;
+            enemy.token_rest = TOKEN_REST;
+        }
+        let rested = if enemy.token_rest > 0.0 { 1000.0 } else { 0.0 };
+        waiting.push((entity, distance + rested, pool));
+    }
+    waiting.sort_by(|a, b| a.1.total_cmp(&b.1));
+    for (entity, _, pool) in waiting {
+        if held[pool] >= pools[pool] {
+            continue;
+        }
+        if let Ok((_, mut enemy, _, _)) = enemies.get_mut(entity) {
+            enemy.token = true;
+            enemy.token_held = 0.0;
+            held[pool] += 1;
+        }
     }
 }
 
@@ -987,6 +1986,7 @@ fn update_hostile_shots(
     voxels: Res<Voxels>,
     mut commands: Commands,
     mut sfx: ResMut<sfx::SfxBank>,
+    mut hit_stop: ResMut<feel::HitStop>,
     mut shots: Query<(Entity, &mut HostileShot, &mut Transform)>,
     mut players: Query<(&mut Player, &mut Transform), Without<HostileShot>>,
 ) {
@@ -1014,6 +2014,7 @@ fn update_hostile_shots(
                     let killed = player.health <= shot.damage;
                     player.health -= shot.damage;
                     player.invuln = HIT_INVULN;
+                    hit_stop.kick(feel::STOP_PLAYER_HURT);
                     sfx.play(&mut commands, if killed { sfx::Cue::Death } else { sfx::Cue::Hurt });
                     if !killed {
                         let away = (-shot.vel).normalize_or_zero();
@@ -1041,6 +2042,54 @@ fn update_hostile_shots(
             shot.prev = next;
             transform.translation = next;
         }
+    }
+}
+
+/// Fast rubble hurts the player too: the same speed-and-size rule as for enemies, gentler, and
+/// the hit's invulnerability window keeps one tumbling slab from landing every frame.
+fn rubble_hits_player(
+    voxels: Res<Voxels>,
+    mut commands: Commands,
+    mut sfx: ResMut<sfx::SfxBank>,
+    mut hit_stop: ResMut<feel::HitStop>,
+    pieces: Query<&falling::FallingPiece>,
+    mut players: Query<(&mut Player, &mut Transform)>,
+) {
+    let Ok((mut player, mut transform)) = players.get_single_mut() else { return };
+    if player.invuln > 0.0 {
+        return;
+    }
+    let feet = player.body.pos;
+    let body = feet + Vec3::Y * 0.9;
+    for piece in &pieces {
+        let speed = piece.speed();
+        if speed <= RUBBLE_MIN_SPEED || piece.center().distance(body) > piece.radius() + 1.0 {
+            continue;
+        }
+        let contact = piece.nearest_surface_point(body);
+        let flat = Vec2::new(contact.x - feet.x, contact.z - feet.z).length();
+        if flat > HUMAN.half_width + 0.15 || contact.y < feet.y - 0.05 || contact.y > feet.y + HUMAN.height {
+            continue;
+        }
+        let heft = (piece.voxel_count() as f32 / 40.0).sqrt().clamp(0.6, 3.0);
+        let damage = ((speed - RUBBLE_MIN_SPEED) * RUBBLE_PLAYER_SCALE * heft).min(RUBBLE_PLAYER_MAX);
+        let killed = player.health <= damage;
+        player.health -= damage;
+        player.invuln = HIT_INVULN;
+        hit_stop.kick(feel::STOP_PLAYER_HURT);
+        sfx.play(&mut commands, sfx::Cue::Hit);
+        sfx.play(&mut commands, if killed { sfx::Cue::Death } else { sfx::Cue::Hurt });
+        if killed {
+            let spawn = voxels.with(spawn_point);
+            *player = Player::spawn_at(spawn);
+            player.invuln = DEATH_INVULN;
+            transform.translation = spawn;
+        } else {
+            let along = piece.velocity();
+            player.shove = Vec3::new(along.x, 0.0, along.z).normalize_or_zero() * 3.0;
+            player.recoil = 0.15;
+        }
+        return;
     }
 }
 
@@ -1103,6 +2152,7 @@ fn player_controller(
     assets: Res<spells::SpellAssets>,
     mut rng: ResMut<spells::Rng>,
     mut sfx: ResMut<sfx::SfxBank>,
+    mut noises: ResMut<senses::Noises>,
     mut players: Query<(&mut Player, &mut CharacterAnim, &mut Transform)>,
     mut enemies: Query<(Entity, &mut Enemy, &mut Transform), Without<Player>>,
 ) {
@@ -1129,6 +2179,25 @@ fn player_controller(
     p.cast_time = (p.cast_time - dt).max(0.0);
     p.invuln = (p.invuln - dt).max(0.0);
     p.recoil = (p.recoil - dt).max(0.0);
+    p.dash_cooldown = (p.dash_cooldown - dt).max(0.0);
+    p.dash_left = (p.dash_left - dt).max(0.0);
+    if let Some(toward) = p.dash_request.take() {
+        if p.dash_cooldown <= 0.0 && p.body.on_ground {
+            let dir = if toward.length_squared() > 0.01 { toward.normalize() } else { combat::forward_from_yaw(p.facing) };
+            p.dash_dir = dir;
+            p.dash_left = DASH_SECONDS;
+            p.dash_cooldown = DASH_COOLDOWN;
+            p.invuln = p.invuln.max(DASH_INVULN);
+            // A dodge drops whatever the hands and feet were committed to.
+            p.swing_left = 0.0;
+            p.recoil = 0.0;
+            p.attack_target = None;
+            p.aim = None;
+            p.target = None;
+            p.facing = combat::yaw_toward(Vec3::ZERO, dir);
+            sfx.play_scaled(&mut commands, sfx::Cue::Swing, 0.6);
+        }
+    }
     let prev_swing = p.swing_left;
     if p.swing_left > 0.0 {
         p.swing_left = (p.swing_left - dt).max(0.0);
@@ -1203,6 +2272,10 @@ fn player_controller(
     let blend = 1.0 - (-responsiveness * dt).exp();
     p.body.vel.x += (wish.x - p.body.vel.x) * blend;
     p.body.vel.z += (wish.z - p.body.vel.z) * blend;
+    if p.dash_left > 0.0 {
+        p.body.vel.x = p.dash_dir.x * DASH_SPEED;
+        p.body.vel.z = p.dash_dir.z * DASH_SPEED;
+    }
 
     if keys.just_pressed(KeyCode::Space) && p.body.on_ground {
         p.body.vel.y = JUMP_SPEED;
@@ -1281,6 +2354,12 @@ fn player_controller(
         }
         if let Some(cue) = landed {
             sfx.play(&mut commands, cue);
+            noises.emit(senses::Noise {
+                at: p.body.pos,
+                radius: senses::MELEE_NOISE_RADIUS,
+                kind: senses::NoiseKind::Sound,
+                reveals: Some(p.body.pos),
+            });
         }
     }
 

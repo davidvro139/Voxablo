@@ -49,7 +49,7 @@ int main() {
     const int screenWidth = 1920;
     const int screenHeight = 1080;
 
-    InitWindow(screenWidth, screenHeight, "Persistent Voxel ARPG - Raylib Viewer");
+    InitWindow(screenWidth, screenHeight, "Voxablo - Raylib Viewer");
     SetTargetFPS(60);
 
     // Setup camera
@@ -155,7 +155,7 @@ int main() {
         EndMode3D();
 
         // UI
-        DrawText("Persistent Voxel ARPG - Raylib", 10, 10, 20, BLACK);
+        DrawText("Voxablo - Raylib", 10, 10, 20, BLACK);
         DrawText(TextFormat("FPS: %d", GetFPS()), 10, 40, 20, BLACK);
         DrawText("SPACE: Damage | C: Collapse | WASD: Move | ESC: Quit", 10, 70, 16, DARKGRAY);
 

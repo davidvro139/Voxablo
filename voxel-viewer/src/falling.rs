@@ -49,6 +49,33 @@ pub struct FallingHit {
     pub distance: f32,
 }
 
+impl FallingPiece {
+    pub fn center(&self) -> Vec3 {
+        self.state.pos
+    }
+
+    pub fn speed(&self) -> f32 {
+        self.state.vel.length()
+    }
+
+    pub fn velocity(&self) -> Vec3 {
+        self.state.vel
+    }
+
+    pub fn radius(&self) -> f32 {
+        self.shape.radius()
+    }
+
+    pub fn voxel_count(&self) -> usize {
+        self.shape.voxels.len()
+    }
+
+    /// Closest sampled point of the piece's surface to `point`.
+    pub fn nearest_surface_point(&self, point: Vec3) -> Vec3 {
+        self.shape.nearest_surface_point(&self.state, point)
+    }
+}
+
 fn piece_mesh(shape: &RigidShape, materials: &[Material]) -> Mesh {
     let size = shape.voxels.iter().fold(IVec3::ZERO, |acc, v| acc.max(*v)) + IVec3::ONE;
     let mut model = VoxelModel::new(size);

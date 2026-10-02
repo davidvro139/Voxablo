@@ -1,4 +1,4 @@
-# Persistent Voxel ARPG — Build Instructions (M0)
+# Voxablo — Build Instructions (M0)
 
 ## Prerequisites
 

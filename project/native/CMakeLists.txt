@@ -52,7 +52,7 @@ if(BUILD_GODOT_EXTENSION)
 endif()
 
 # Diagnostic output
-message(STATUS "Voxel ARPG Native Build Configuration:")
+message(STATUS "Voxablo Native Build Configuration:")
 message(STATUS "  C++ Standard: ${CMAKE_CXX_STANDARD}")
 message(STATUS "  Compiler: ${CMAKE_CXX_COMPILER_ID}")
 message(STATUS "  Build Type: ${CMAKE_BUILD_TYPE}")

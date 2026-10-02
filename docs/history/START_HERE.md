@@ -1,4 +1,4 @@
-# 🎮 Persistent Voxel ARPG — START HERE
+# 🎮 Voxablo — START HERE
 
 **Status:** ✅ **M0 COMPLETE** — Ready for M1 (Voxel Terrain Rendering)
 

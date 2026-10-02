@@ -2,7 +2,7 @@
 setlocal enabledelayedexpansion
 
 echo.
-echo === Persistent Voxel ARPG — Native Build ===
+echo === Voxablo — Native Build ===
 echo.
 
 set BUILD_DIR=native\build

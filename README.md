@@ -1,11 +1,11 @@
-# Persistent Voxel ARPG
+# Voxablo
 
 An isometric dark-fantasy action RPG prototype that combines Diablo II-style combat and
 itemization with Teardown-style destructible voxel environments. Every region is
 procedurally generated and persists: destroyed terrain stays destroyed, and killed enemies
 stay dead.
 
-**Status:** early prototype; working title only. **Target:** Windows PC, single-player.
+**Status:** early prototype. **Target:** Windows PC, single-player.
 
 ## What's here
 
@@ -44,6 +44,7 @@ a relink. `cargo test --release -p voxel-viewer` runs the Rust tests.
 | Right click / hold | Cast the selected spell |
 | 1–5 | Select spell: Arcane Bolt, Disintegrate, Fire Orb, Meteor, Frost Nova |
 | Shift / Space | Sprint / jump |
+| Left Ctrl | Dodge toward the cursor (brief invulnerability) |
 | Mouse wheel | Zoom |
 | R | Regenerate terrain and respawn |
 

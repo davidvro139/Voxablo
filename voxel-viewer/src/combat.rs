@@ -21,7 +21,19 @@ const PARTS: usize = 8;
 const LIMB_SLACK: f32 = 0.14;
 /// A committed aim wins when it is nearly as close as the nearest part.
 const PREFER_SLACK: f32 = 0.22;
-const ARC_DOT: f32 = 0.35;
+pub const ARC_DOT: f32 = 0.35;
+
+/// Seconds a body reels after its poise breaks. Nothing is swung or stepped while it lasts.
+pub const STAGGER_SECONDS: f32 = 0.6;
+/// A part coming off is a shorter flinch: the stance change is already the big consequence.
+pub const SEVER_STAGGER_SECONDS: f32 = 0.4;
+/// After a stagger, poise damage cannot stagger again for this long, so a fight can't be stunlocked.
+const STAGGER_GUARD: f32 = 1.2;
+/// Poise starts refilling after this long without a hit.
+const POISE_REGEN_DELAY: f32 = 1.2;
+const POISE_REGEN_PER_SECOND: f32 = 35.0;
+/// How much further out a melee body waits while another one has the attack.
+pub const WAIT_RING: f32 = 1.6;
 
 /// How far beside a part box the cursor still grabs that body.
 /// Sword reach stays on `strike_along`; this is only the click magnet.
@@ -559,6 +571,17 @@ fn volume_center(species: Species, part: Part) -> Vec3 {
     if n == 0.0 { Vec3::ZERO } else { sum / n }
 }
 
+/// Poise per body. One melee cut (52) that takes no part staggers a fallen or an archer,
+/// two land it on a skeleton, and a zombie shrugs off a single cut.
+fn max_poise(species: Species) -> f32 {
+    match species {
+        Species::Fallen => 45.0,
+        Species::Skeleton => 70.0,
+        Species::Zombie => 95.0,
+        Species::Archer => 40.0,
+    }
+}
+
 fn integrity_of(species: Species, part: Part) -> f32 {
     match (species, part) {
         (Species::Skeleton, Part::LeftArm) => 46.0,
@@ -624,14 +647,27 @@ pub struct StrikeReport {
     /// Impact on the part, in the same space as the query that produced it.
     pub impact: Option<Vec3>,
     pub became_down: bool,
+    /// The hit broke poise or took a part, and the body is now reeling.
+    pub staggered: bool,
     pub stance: Stance,
     pub reason: Option<DownReason>,
 }
 
 impl StrikeReport {
     fn none(stance: Stance, reason: Option<DownReason>) -> Self {
-        Self { hit: None, severed: Vec::new(), impact: None, became_down: false, stance, reason }
+        Self { hit: None, severed: Vec::new(), impact: None, became_down: false, staggered: false, stance, reason }
     }
+}
+
+/// What a committed attack covers on the ground, for the windup telegraph.
+#[derive(Clone, Copy, Debug)]
+pub struct Telegraph {
+    pub yaw: f32,
+    pub range: f32,
+    /// An arrow flies down a lane instead of sweeping the melee arc.
+    pub ranged: bool,
+    /// 0 when the windup starts, 1 when the blow lands.
+    pub fill: f32,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -678,11 +714,14 @@ pub fn choose_cursor_body(samples: &[CursorSample], ground_along: Option<f32>, s
 struct AttackClock {
     timer: f32,
     locked_yaw: Option<f32>,
+    /// Lengths this attack was committed with; a frenzied body swings faster than its profile.
+    windup_len: f32,
+    recover_len: f32,
 }
 
 impl Default for AttackClock {
     fn default() -> Self {
-        Self { timer: 0.0, locked_yaw: None }
+        Self { timer: 0.0, locked_yaw: None, windup_len: 0.0, recover_len: 0.0 }
     }
 }
 
@@ -694,6 +733,15 @@ pub struct Fighter {
     stance: Stance,
     reason: Option<DownReason>,
     attack: AttackClock,
+    poise: f32,
+    /// Seconds left reeling. Positive means no attack and no movement of its own.
+    stagger: f32,
+    /// Seconds left in which poise damage cannot stagger again.
+    guard: f32,
+    /// Seconds since the last hit, for poise regeneration.
+    quiet: f32,
+    /// Poise damage gathered by the strike being resolved.
+    pending_poise: f32,
 }
 
 impl Fighter {
@@ -710,6 +758,11 @@ impl Fighter {
             stance: Stance::Down,
             reason: None,
             attack: AttackClock::default(),
+            poise: max_poise(species),
+            stagger: 0.0,
+            guard: 0.0,
+            quiet: 0.0,
+            pending_poise: 0.0,
         };
         for part in Part::ALL {
             if species.has(part) {
@@ -755,17 +808,77 @@ impl Fighter {
         self.attack.timer > 0.0
     }
 
+    /// How fast the current stance can walk, in m/s.
+    pub fn move_speed(&self) -> f32 {
+        profile(self.stance).speed
+    }
+
+    /// Drop a windup that was committed against a player the body can no longer sense.
+    pub fn calm(&mut self) {
+        if self.attack.timer > 0.0 {
+            self.attack = AttackClock::default();
+        }
+    }
+
+    pub fn parts_left(&self) -> u32 {
+        self.attached.iter().filter(|on| **on).count() as u32
+    }
+
+    pub fn is_staggered(&self) -> bool {
+        self.stagger > 0.0
+    }
+
+    /// The arc or lane the current windup will cover, while one is committed.
+    pub fn telegraph(&self) -> Option<Telegraph> {
+        let yaw = self.attack.locked_yaw?;
+        if self.attack.timer <= 0.0 || self.is_down() {
+            return None;
+        }
+        let profile = profile(self.stance);
+        let fill = 1.0 - (self.attack.timer / self.windup_len().max(1.0e-3)).clamp(0.0, 1.0);
+        Some(Telegraph { yaw, range: profile.range, ranged: shoots(self.stance), fill })
+    }
+
+    /// Windup of the attack in progress, or the stance's own when none was committed.
+    fn windup_len(&self) -> f32 {
+        if self.attack.windup_len > 0.0 {
+            self.attack.windup_len
+        } else {
+            profile(self.stance).windup
+        }
+    }
+
+    fn recover_len(&self) -> f32 {
+        if self.attack.recover_len > 0.0 {
+            self.attack.recover_len
+        } else {
+            profile(self.stance).recover
+        }
+    }
+
+    /// Melee bodies share a smaller pool than archers. Stances that cannot move never queue for one.
+    pub fn wants_token(&self) -> Option<bool> {
+        if self.is_down() || profile(self.stance).speed <= 0.0 {
+            return None;
+        }
+        Some(shoots(self.stance))
+    }
+
+    /// A windup or recovery is running, so a token held for it must not be taken away.
+    pub fn mid_attack(&self) -> bool {
+        self.attack.timer != 0.0
+    }
+
     /// 0 at the start of a swing, 0.36 when the blow lands, 1 after recover.
     /// The landing frame is the same instant `plan_fight` deals damage (timer crosses 0).
     pub fn attack_progress(&self) -> Option<f32> {
-        let profile = profile(self.stance);
         let timer = self.attack.timer;
         if timer > 0.0 {
-            let windup = profile.windup.max(1.0e-3);
+            let windup = self.windup_len().max(1.0e-3);
             let u = 1.0 - (timer / windup).clamp(0.0, 1.0);
             Some(u * 0.36)
         } else if timer < 0.0 {
-            let recover = profile.recover.max(1.0e-3);
+            let recover = self.recover_len().max(1.0e-3);
             let u = (1.0 + timer / recover).clamp(0.0, 1.0);
             Some(0.36 + u * 0.64)
         } else {
@@ -775,7 +888,7 @@ impl Fighter {
 
     /// Which part of a committed swing the body should show. Guard is everything else.
     pub fn swing_pose(&self) -> SwingPose {
-        let windup = profile(self.stance).windup;
+        let windup = self.windup_len();
         let timer = self.attack.timer;
         if timer > 0.0 && windup > 0.0 && timer > windup * 0.38 {
             SwingPose::Windup
@@ -948,6 +1061,7 @@ impl Fighter {
         }
         self.integrity[index] -= amount;
         self.hits += 1;
+        self.pending_poise += amount;
         if self.integrity[index] <= 0.0 {
             self.attached[index] = false;
             true
@@ -958,18 +1072,54 @@ impl Fighter {
 
     fn finish(&mut self, before: Stance, hit: Option<Part>, impact: Option<Vec3>, severed: Vec<Part>) -> StrikeReport {
         self.recompute(before);
-        // A part coming off breaks the swing that was already committed.
-        if !severed.is_empty() && self.stance != Stance::Down {
-            self.attack.timer = -0.28;
-            self.attack.locked_yaw = None;
+        let poise_damage = std::mem::take(&mut self.pending_poise);
+        let mut staggered = false;
+        if self.stance != Stance::Down && hit.is_some() {
+            self.quiet = 0.0;
+            self.poise -= poise_damage;
+            // A part coming off breaks the swing that was already committed.
+            if !severed.is_empty() {
+                staggered = self.begin_stagger(SEVER_STAGGER_SECONDS);
+            } else if self.poise <= 0.0 && self.guard <= 0.0 {
+                staggered = self.begin_stagger(STAGGER_SECONDS);
+            }
+            self.poise = self.poise.max(0.0);
         }
         StrikeReport {
             hit,
             severed,
             impact,
             became_down: before != Stance::Down && self.stance == Stance::Down,
+            staggered,
             stance: self.stance,
             reason: self.reason,
+        }
+    }
+
+    /// Cancel the committed attack and reel. Returns false while an earlier stagger is still running.
+    fn begin_stagger(&mut self, seconds: f32) -> bool {
+        if self.stagger > 0.0 {
+            return false;
+        }
+        self.attack = AttackClock::default();
+        self.stagger = seconds;
+        self.poise = max_poise(self.species);
+        true
+    }
+
+    /// Stagger, guard, and poise clocks. `plan_fight` calls this once per frame.
+    fn tick(&mut self, dt: f32) {
+        if self.stagger > 0.0 {
+            self.stagger = (self.stagger - dt).max(0.0);
+            if self.stagger == 0.0 {
+                self.guard = STAGGER_GUARD;
+            }
+        } else {
+            self.guard = (self.guard - dt).max(0.0);
+        }
+        self.quiet += dt;
+        if self.quiet >= POISE_REGEN_DELAY {
+            self.poise = (self.poise + POISE_REGEN_PER_SECOND * dt).min(max_poise(self.species));
         }
     }
 
@@ -1130,13 +1280,39 @@ pub struct FightPlan {
     /// Arrow damage to loose this frame. The bolt travels; it is not a hitscan.
     pub shot: f32,
     pub winding_up: bool,
+    /// The recovery ran out this frame; an attack token held for it can go back.
+    pub attack_finished: bool,
 }
 
 impl FightPlan {
     fn idle(yaw: f32) -> Self {
-        Self { velocity: Vec3::ZERO, yaw, strike_damage: 0.0, shot: 0.0, winding_up: false }
+        Self { velocity: Vec3::ZERO, yaw, strike_damage: 0.0, shot: 0.0, winding_up: false, attack_finished: false }
     }
 }
+
+/// What the group allows this body this frame.
+#[derive(Clone, Copy, Debug)]
+pub struct Engage {
+    /// Holds an attack token. Without one the body keeps its distance and circles.
+    pub may_attack: bool,
+    /// Which way to circle: +1 or -1, stable per body so a group fans out.
+    pub side: f32,
+    /// Backed into something. An archer stops trying to open the gap and shoots point-blank.
+    pub cornered: bool,
+    /// Multiplies windup and recovery; below 1 the body attacks faster (and moves a little faster).
+    pub haste: f32,
+}
+
+impl Default for Engage {
+    fn default() -> Self {
+        Self { may_attack: true, side: 1.0, cornered: false, haste: 1.0 }
+    }
+}
+
+/// An archer closer than this fraction of its stop distance won't draw; it backs off first.
+const KITE_FRACTION: f32 = 0.75;
+/// Backing off is a scramble, faster than an archer's walk.
+const KITE_SPEED_SCALE: f32 = 1.6;
 
 pub fn yaw_toward(from: Vec3, to: Vec3) -> f32 {
     let d = to - from;
@@ -1147,10 +1323,16 @@ pub fn forward_from_yaw(yaw: f32) -> Vec3 {
     Vec3::new(-yaw.sin(), 0.0, -yaw.cos())
 }
 
-/// Advance the committed attack. Facing locks when the windup starts, so leaving that arc is a dodge.
+/// A body fighting alone: it always has the attack.
+#[cfg(test)]
 pub fn plan_fight(fighter: &mut Fighter, dt: f32, from: Vec3, to: Vec3) -> FightPlan {
+    plan_fight_engaged(fighter, dt, from, to, Engage::default())
+}
+
+/// Advance the committed attack. Facing locks when the windup starts, so leaving that arc is a dodge.
+pub fn plan_fight_engaged(fighter: &mut Fighter, dt: f32, from: Vec3, to: Vec3, engage: Engage) -> FightPlan {
     let stance = fighter.stance;
-    let profile = profile(stance);
+    let mut profile = profile(stance);
     let flat = Vec3::new(to.x - from.x, 0.0, to.z - from.z);
     let dist = flat.length();
     let dir = flat.normalize_or_zero();
@@ -1160,10 +1342,28 @@ pub fn plan_fight(fighter: &mut Fighter, dt: f32, from: Vec3, to: Vec3) -> Fight
         fighter.attack = AttackClock::default();
         return FightPlan::idle(face_yaw);
     }
+    fighter.tick(dt);
+    if fighter.is_staggered() {
+        return FightPlan::idle(fighter.attack.locked_yaw.unwrap_or(face_yaw));
+    }
 
     let mut strike_damage = 0.0;
     let mut shot = 0.0;
+    let mut attack_finished = false;
     let ranged = shoots(stance);
+    let haste = engage.haste.clamp(0.25, 2.0);
+    profile.windup *= haste;
+    profile.recover *= haste;
+    profile.speed /= haste.sqrt();
+    let idle_clock = fighter.attack.timer == 0.0;
+    if idle_clock && !engage.may_attack {
+        // Waiting a turn: hold a wider ring than the body's own and circle it.
+        if !ranged {
+            profile.preferred += WAIT_RING;
+            profile.stop += WAIT_RING;
+        }
+        profile.strafe = true;
+    }
     if fighter.attack.timer > 0.0 {
         let committed = forward_from_yaw(fighter.attack.locked_yaw.unwrap_or(face_yaw));
         fighter.attack.timer -= dt;
@@ -1177,12 +1377,19 @@ pub fn plan_fight(fighter: &mut Fighter, dt: f32, from: Vec3, to: Vec3) -> Fight
                 }
             }
             fighter.attack.timer = -profile.recover;
+            fighter.attack.recover_len = profile.recover;
             fighter.attack.locked_yaw = None;
         }
     } else if fighter.attack.timer < 0.0 {
         fighter.attack.timer = (fighter.attack.timer + dt).min(0.0);
-    } else if dist <= profile.range && dist > 0.05 {
+        attack_finished = fighter.attack.timer == 0.0;
+    } else if engage.may_attack
+        && dist <= profile.range
+        && dist > 0.05
+        && !(ranged && !engage.cornered && dist < profile.stop * KITE_FRACTION)
+    {
         fighter.attack.timer = profile.windup;
+        fighter.attack.windup_len = profile.windup;
         fighter.attack.locked_yaw = Some(face_yaw);
     }
 
@@ -1208,18 +1415,20 @@ pub fn plan_fight(fighter: &mut Fighter, dt: f32, from: Vec3, to: Vec3) -> Fight
         // Open the gap so the next committed step reads, instead of circling in range.
         -dir * profile.speed
     } else if dist < profile.stop && profile.speed > 0.0 {
-        -dir * profile.speed
+        -dir * profile.speed * if ranged { KITE_SPEED_SCALE } else { 1.0 }
     } else if dist > profile.preferred {
         dir * profile.speed
     } else if profile.strafe {
-        let side = Vec3::new(-dir.z, 0.0, dir.x);
+        let side = Vec3::new(-dir.z, 0.0, dir.x) * engage.side;
         let error = (dist - profile.preferred).clamp(-0.6, 0.6);
-        side * profile.speed + dir * error * profile.speed
+        // Waiting bodies drift slower than they fight, so the ring reads as pacing, not orbiting.
+        let pace = if engage.may_attack { 1.0 } else { 0.55 };
+        side * profile.speed * pace + dir * error * profile.speed
     } else {
         Vec3::ZERO
     };
 
-    FightPlan { velocity, yaw, strike_damage, shot, winding_up: winding }
+    FightPlan { velocity, yaw, strike_damage, shot, winding_up: winding, attack_finished }
 }
 
 #[cfg(test)]
@@ -1291,6 +1500,102 @@ mod tests {
         let crawling = plan_fight(&mut brute, 0.016, Vec3::ZERO, Vec3::new(0.0, 0.0, -5.0));
         assert!(crawling.velocity.length() < 0.7, "{}", crawling.velocity.length());
         assert!(!brute.is_down());
+    }
+
+    #[test]
+    fn without_a_token_a_body_in_reach_does_not_wind_up() {
+        let mut brute = Fighter::claw_brute();
+        let waiting = Engage { may_attack: false, ..Engage::default() };
+        let plan = plan_fight_engaged(&mut brute, 0.016, Vec3::ZERO, Vec3::new(0.0, 0.0, -1.0), waiting);
+        assert!(!brute.is_winding());
+        // Inside its waiting ring, it backs off instead of crowding in.
+        assert!(plan.velocity.z > 0.0, "{}", plan.velocity);
+        plan_fight(&mut brute, 0.016, Vec3::ZERO, Vec3::new(0.0, 0.0, -1.0));
+        assert!(brute.is_winding());
+        assert!(brute.telegraph().is_some());
+    }
+
+    #[test]
+    fn the_token_comes_back_when_recovery_ends() {
+        let mut brute = Fighter::claw_brute();
+        let to = Vec3::new(0.0, 0.0, -1.0);
+        let mut finished = false;
+        for _ in 0..200 {
+            finished |= plan_fight(&mut brute, 0.01, Vec3::ZERO, to).attack_finished;
+            if finished {
+                break;
+            }
+        }
+        assert!(finished);
+        assert!(!brute.mid_attack());
+    }
+
+    #[test]
+    fn an_archer_backs_off_before_drawing_unless_cornered() {
+        let mut archer = Fighter::new(Species::Archer);
+        let close = Vec3::new(0.0, 0.0, -2.0);
+        let plan = plan_fight(&mut archer, 0.016, Vec3::ZERO, close);
+        assert!(!archer.is_winding());
+        assert!(plan.velocity.z > 2.0, "scrambles away: {}", plan.velocity);
+        let cornered = Engage { cornered: true, ..Engage::default() };
+        plan_fight_engaged(&mut archer, 0.016, Vec3::ZERO, close, cornered);
+        assert!(archer.is_winding());
+    }
+
+    #[test]
+    fn haste_shortens_the_windup_and_the_telegraph_still_fills_from_zero() {
+        let mut brute = Fighter::claw_brute();
+        let to = Vec3::new(0.0, 0.0, -1.0);
+        let hasted = Engage { haste: 0.5, ..Engage::default() };
+        plan_fight_engaged(&mut brute, 0.001, Vec3::ZERO, to, hasted);
+        assert!(brute.telegraph().unwrap().fill < 0.05);
+        let mut landed_after = 0.0;
+        for step in 1..200 {
+            let plan = plan_fight_engaged(&mut brute, 0.01, Vec3::ZERO, to, hasted);
+            if plan.strike_damage > 0.0 {
+                landed_after = step as f32 * 0.01;
+                break;
+            }
+        }
+        let normal = profile(Stance::CircleSlash).windup;
+        assert!(landed_after > 0.0 && landed_after < normal * 0.6, "{landed_after} vs {normal}");
+    }
+
+    #[test]
+    fn breaking_poise_cancels_the_windup() {
+        let mut brute = Fighter::claw_brute();
+        plan_fight(&mut brute, 0.016, Vec3::ZERO, Vec3::new(0.0, 0.0, -1.0));
+        assert!(brute.is_winding());
+        // A torso chip takes no part but drains more than a fallen's poise.
+        let report = brute.strike_part(Part::Torso, MELEE_CUT);
+        assert!(report.severed.is_empty());
+        assert!(report.staggered);
+        assert!(!brute.is_winding());
+        let plan = plan_fight(&mut brute, 0.016, Vec3::ZERO, Vec3::new(0.0, 0.0, -1.0));
+        assert_eq!(plan.velocity, Vec3::ZERO);
+        assert!(!brute.is_winding());
+    }
+
+    #[test]
+    fn a_fresh_stagger_guards_against_stunlock() {
+        let mut brute = Fighter::claw_brute();
+        assert!(brute.strike_part(Part::Torso, 30.0).severed.is_empty());
+        assert!(brute.strike_part(Part::Torso, 30.0).staggered);
+        // Reel out the stagger; the guard window starts.
+        for _ in 0..70 {
+            plan_fight(&mut brute, 0.01, Vec3::ZERO, Vec3::new(0.0, 0.0, -5.0));
+        }
+        assert!(!brute.is_staggered());
+        let report = brute.strike_part(Part::Torso, 10.0);
+        assert!(!report.staggered);
+    }
+
+    #[test]
+    fn a_zombie_shrugs_off_one_cut() {
+        let mut zombie = Fighter::new(Species::Zombie);
+        let report = zombie.strike_part(Part::Torso, MELEE_CUT);
+        assert!(!report.staggered);
+        assert!(zombie.strike_part(Part::Torso, MELEE_CUT).staggered);
     }
 
     #[test]

@@ -144,6 +144,73 @@ pub struct FireOrb {
     fuse: f32,
 }
 
+impl FireOrb {
+    /// Seconds until it bursts, and how far the burst reaches in metres.
+    pub fn danger(&self) -> (f32, f32) {
+        (self.fuse, ORB_RADIUS * VOXEL_SIZE)
+    }
+}
+
+/// A blast queued by game logic outside the spell systems (a volatile body bursting).
+/// `radius` is in voxels like the spells'; `enemy_damage` is dealt to bodies inside it.
+#[derive(Clone, Copy)]
+pub struct Detonation {
+    pub center: Vec3,
+    pub radius: f32,
+    pub energy: f32,
+    pub enemy_damage: f32,
+    /// A shoulder through a wall, not a fireball: no flash, less debris and shake.
+    pub quiet: bool,
+}
+
+#[derive(Resource, Default)]
+pub struct Detonations(pub Vec<Detonation>);
+
+/// Set off queued detonations with the same crater, debris, flash and body damage as a fire orb.
+#[allow(clippy::too_many_arguments)]
+pub fn run_detonations(
+    mut commands: Commands,
+    voxels: Res<Voxels>,
+    assets: Res<SpellAssets>,
+    mut materials: ResMut<Assets<StandardMaterial>>,
+    mut rng: ResMut<Rng>,
+    mut shake: ResMut<CameraShake>,
+    mut blasts: EventWriter<Blasted>,
+    mut sfx: ResMut<crate::sfx::SfxBank>,
+    mut queue: ResMut<Detonations>,
+    mut enemies: Query<(&mut Enemy, &Transform)>,
+) {
+    for blast in std::mem::take(&mut queue.0) {
+        let style = if blast.quiet {
+            BlastStyle { flash: None, max_debris: 24, shake: 0.12, push: 2.5 }
+        } else {
+            BlastStyle {
+                flash: Some((Color::rgba_linear(14.0, 6.0, 1.5, 1.0), 2.6, 750_000.0)),
+                max_debris: 70,
+                shake: 0.7,
+                push: 5.0,
+            }
+        };
+        sfx.play(&mut commands, if blast.quiet { crate::sfx::Cue::Clang } else { crate::sfx::Cue::FireBurst });
+        voxels.with(|w| {
+            explode(
+                &mut commands,
+                w,
+                &assets,
+                &mut rng,
+                &mut materials,
+                &mut blasts,
+                &mut shake,
+                blast.center,
+                blast.radius,
+                blast.energy,
+                style,
+            )
+        });
+        damage_enemies(&mut enemies, blast.center, blast.radius * VOXEL_SIZE, blast.enemy_damage, &mut commands, &assets, &mut rng);
+    }
+}
+
 #[derive(Component)]
 pub struct BeamVisual;
 
@@ -462,6 +529,7 @@ impl Plugin for SpellsPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<SpellState>()
             .init_resource::<CameraShake>()
+            .init_resource::<Detonations>()
             .insert_resource(Rng(0x9E37_79B9_7F4A_7C15))
             .add_systems(Startup, setup_spells);
     }

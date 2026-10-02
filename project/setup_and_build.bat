@@ -3,7 +3,7 @@ setlocal enabledelayedexpansion
 
 echo.
 echo ===================================================
-echo Persistent Voxel ARPG — M0 Setup & Build Script
+echo Voxablo — M0 Setup & Build Script
 echo ===================================================
 echo.
 

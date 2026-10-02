@@ -10,7 +10,7 @@ config_version=5
 
 [application]
 
-config/name="Persistent Voxel ARPG"
+config/name="Voxablo"
 config/description="Dark-fantasy action RPG with persistent procedurally generated regions and fine-grained voxel destruction."
 config/version="0.1.0"
 run/main_scene="res://scenes/main.tscn"
