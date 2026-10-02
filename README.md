@@ -47,6 +47,7 @@ a relink. `cargo test --release -p voxel-viewer` runs the Rust tests.
 | Left Ctrl | Dodge toward the cursor (brief invulnerability) |
 | Mouse wheel | Zoom |
 | R | Regenerate terrain and respawn |
+| F3 | Toggle the AI director overlay |
 
 ## Design documents
 

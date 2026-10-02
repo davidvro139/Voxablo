@@ -96,6 +96,12 @@ Units are metres; voxels are 10 cm (Teardown scale).
   when wrecked and alone. A pacing director wakes the nearest unaware group after a quiet spell and
   allows only one melee attacker at a time while you are below 35 health.
   `RUST_LOG=voxel_viewer=debug` logs director phase changes and nav rebuild timings.
+  F3 shows the director overlay: phase, intensity, mercy, next wave, body states, tokens, intents.
+- Routing beyond the player: cached goal maps for searching and falling back, a shelter map that
+  sends maimed bodies under the nearest roof, and archer firing positions with a clear shot.
+  Fast rubble now hurts the player as well.
+- Elite traits: Volatile (orange; bursts after going down), Wallbreaker (blue; smashes through walls
+  it's stuck on), Frenzied (red; a nearby death speeds its attacks for 8 s). Two roster slots each.
 
 ## Known issues in voxel_core
 

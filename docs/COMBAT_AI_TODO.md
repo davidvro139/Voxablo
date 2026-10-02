@@ -29,10 +29,11 @@ Constraint carried from the design: nothing respawns or spawns extra enemies.
 - [x] **Fallen cowardice.** Fallen near a death scatter for a few seconds; cornered ones keep fighting.
       *Ref: Diablo II retreat mode.*
 - [x] **Maimed retreat (first pass).** Some armless bodies (not zombies) limp away from the player for 6 s.
-- [ ] **Maimed retreat toward structures.** Needs the tier 3 navigation.
+- [x] **Maimed retreat toward structures.** A shelter map (floors with a roof within 3 m) leads maimed
+      bodies indoors; blasting the roof off rebuilds it.
 - [x] **Exaggerated reads.** Growl on spotting, shriek on panic, HUD shows unaware / searching /
       panicking. One bark per group. *Ref: Halo, F.E.A.R.*
-- [ ] **Flank bark.** Waits for flanking behaviour (tier 4).
+- [x] **Flank bark.** A growl when a body starts flanking (tier 5).
 
 ## Tier 3 — navigation in a destructible world
 - [x] **Dijkstra map to the player** on a 0.5 m grid with up to four floors per column (storeys, bridge
@@ -42,24 +43,28 @@ Constraint carried from the design: nothing respawns or spawns extra enemies.
 - [x] **Flee map** (chase map × −1.2, rescanned) for retreating without running into dead ends.
 - [x] **Stuck recovery.** 0.5 s of no progress switches to the map for 1 s, or slides sideways if
       there is no route; a search trail that can't be routed is dropped.
-- [ ] **Routes to arbitrary goals** (searching a spot far from the player, retreating to buildings).
-      Needs per-goal fills or a few cached landmark maps.
+- [x] **Routes to arbitrary goals.** Up to 8 cached goal maps (2 new per frame at most, cleared on
+      any edit). Searching, falling back to an ally, and archer perches all route.
 - [ ] **Body width.** Probes are one voxel wide, so a route may use gaps narrower than a body.
 
 ## Tier 4 — roles and environment
 - [x] **Archer kiting.** Inside ~3.6 m an archer won't draw; it scrambles back at 1.6× speed and only
       shoots point-blank once cornered. Losing sight already sends it to the last known spot.
-- [ ] **Archer firing positions.** Pick a cell with a clear lane instead of walking toward the last sighting.
+- [x] **Archer firing positions.** An archer that can't see you tests 32 spots on 6.5 m and 9 m rings for
+      a clear shot and a route, and walks to the nearest (re-picked every 1.5 s).
 - [x] **Skeleton front line.** A shielded skeleton waiting its turn stands 2.2 m from the player on the
       line to the nearest archer, shield facing the player.
 - [x] **Fuse dodging.** Alert bodies within an orb's reach (+0.6 m) in its last second drop the swing and run.
 - [x] **Rubble hurts.** Falling pieces faster than 3 m/s damage the part they meet, scaled by speed and
       size, and shove the body.
-- [ ] **Rubble hurts the player** and environmental kills earn credit once progression exists.
+- [x] **Rubble hurts the player** (4 per m/s over 3 m/s, scaled by size, max 45).
+- [ ] **Environmental kill credit** once progression exists.
 - [x] **Volatile elite.** Two roster slots (a fallen, a zombie) smoulder orange. Downed, they show a
       filling burst ring for 0.9 s, then crater 1.6 m, hurt nearby bodies, and can chain.
       *Ref: Diablo champion affixes.*
-- [ ] **More affixes.** "Charges through brick" and others that use destruction.
+- [x] **More affixes.** Wallbreaker (steel blue; stuck 0.3 s, it smashes a 0.7 m hole ahead) and
+      Frenzied (red; a death within 10 m: 0.6x windup/recovery, faster feet for 8 s).
+- [ ] **Further affixes** (e.g. one that digs, one that rebuilds cover).
 
 ## Tier 5 — orchestration
 - [x] **Utility layer** (`src/utility.rs`). Engaged bodies score Press / Hold / Flank / Regroup from
@@ -70,5 +75,5 @@ Constraint carried from the design: nothing respawns or spawns extra enemies.
       engaged. In a quiet build-up it has the nearest unaware body call its pack in, at most every 12 s;
       never adds enemies. Below 35 health only one melee body may swing at a time.
       *Ref: Left 4 Dead AI Director.*
-- [ ] **Director in the HUD / debug overlay** so pacing can be tuned by eye.
+- [x] **Director overlay (F3)**: phase, intensity, mercy, next wave, body states, tokens, intents.
 - [ ] **Tune by playtest**: token pool, poise, flank distance, director thresholds.
